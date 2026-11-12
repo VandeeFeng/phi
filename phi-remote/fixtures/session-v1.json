@@ -1,0 +1,10 @@
+{
+  "session": { "sessionId": "session-1" },
+  "create": { "workingDir": "/tmp/target project" },
+  "saved": { "query": "recent" },
+  "resume": { "id": "saved-1" },
+  "configure": { "kind": "model", "selection": "provider/model" },
+  "submit": { "text": "inspect", "delivery": "follow_up", "fileContext": ["file context"] },
+  "message": { "agentId": "child-1", "message": "inspect" },
+  "permission": { "agentId": "child-1", "requestId": "permission-1", "decision": "allow_once" }
+}

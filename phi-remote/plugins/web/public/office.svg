@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" shape-rendering="crispEdges">
+  <view id="desk" viewBox="0 0 96 96"/>
+  <view id="person-0" viewBox="100 0 32 48"/>
+  <view id="person-1" viewBox="140 0 32 48"/>
+  <view id="person-2" viewBox="180 0 32 48"/>
+  <view id="person-3" viewBox="220 0 32 48"/>
+  <view id="person-4" viewBox="260 0 32 48"/>
+  <view id="person-5" viewBox="300 0 32 48"/>
+  <view id="portrait-0" viewBox="102 -2 28 35"/>
+  <view id="portrait-1" viewBox="142 -2 28 35"/>
+  <view id="portrait-2" viewBox="182 -2 28 35"/>
+  <view id="portrait-3" viewBox="222 -2 28 35"/>
+  <view id="portrait-4" viewBox="262 -2 28 35"/>
+  <view id="portrait-5" viewBox="302 -2 28 35"/>
+  <defs>
+    <g id="person">
+      <path fill="#352e36" d="M9 1h14v3h3v19H6V5h3z"/>
+      <path fill="#e5b38c" d="M10 7h12v15H10zM7 11h3v7H7zm15 0h3v7h-3z"/>
+      <path fill="#352e36" d="M9 4h14v5H9zm3 9h2v2h-2zm7 0h2v2h-2z"/>
+      <path fill="#ad6c63" d="M14 18h5v2h-5z"/>
+      <path fill="currentColor" d="M8 24h16v4h4v13H4V28h4z"/>
+      <path fill="#eee1c8" d="M12 24h8l-4 7z"/>
+      <path fill="#e5b38c" d="M4 34h5v7H4zm19 0h5v7h-5z"/>
+      <path fill="#454551" d="M9 40h14v6H9z"/>
+      <path fill="#29262d" d="M7 45h8v3H7zm10 0h8v3h-8z"/>
+    </g>
+  </defs>
+  <g stroke="#4b4039" stroke-width="2">
+    <path fill="#b89258" d="M9 21h78v36H9z"/>
+    <path fill="#d9b574" d="M7 17h82v32H7z"/>
+    <path fill="#806546" d="M11 51h5v17h-5zm69 0h5v17h-5z"/>
+    <path fill="#e5c58d" stroke="#b69160" d="M9 25h78M9 37h78"/>
+    <path fill="#696574" d="M31 6h34v25H31z"/>
+    <path fill="#304750" d="M35 10h26v17H35z" stroke="none"/>
+    <path fill="#96c4b0" d="M38 14h12v2H38zm0 5h19v2H38z" stroke="none"/>
+    <path fill="#b5b2b0" d="M45 32h7v4h7v3H38v-3h7zM31 42h33v7H31z"/>
+    <path fill="#f8ebd3" d="M74 32h8v10h-8z"/>
+  </g>
+  <use href="#person" x="100" color="#568c88"/>
+  <use href="#person" x="140" color="#b97758"/>
+  <use href="#person" x="180" color="#7f78a7"/>
+  <use href="#person" x="220" color="#bb8d42"/>
+  <use href="#person" x="260" color="#66835b"/>
+  <use href="#person" x="300" color="#77889d"/>
+</svg>

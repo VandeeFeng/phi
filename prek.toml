@@ -1,0 +1,16 @@
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "end-of-file-fixer" },
+]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "phi-validation"
+name = "phi validation"
+language = "system"
+entry = "bash -c 'unset $(git rev-parse --local-env-vars); exec ./test.sh full'"
+files = "\\.rs$|Cargo\\.(toml|lock)$|^test\\.sh$|^prek\\.toml$"
+pass_filenames = false

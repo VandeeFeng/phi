@@ -1,0 +1,23 @@
+{
+  "name": "phi-web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "esbuild public/app.ts public/index.html public/styles.css public/*.svg --bundle --format=esm --target=es2022 --outdir=dist/demo --loader:.html=copy --loader:.css=copy --loader:.svg=copy --asset-names=[name] --banner:js='new EventSource(\"/esbuild\").addEventListener(\"change\", () => location.reload());' --servedir=dist/demo --serve=127.0.0.1:8080 --watch",
+    "typecheck": "tsc && tsc -p public/tsconfig.json",
+    "build": "pnpm typecheck && esbuild test.ts remote/protocol.ts public/auth.ts public/demo.ts --outdir=dist --outbase=. --format=esm --target=es2022 && esbuild public/app.ts --bundle --outfile=dist/public/app.js --format=esm --target=es2022 && cp public/*.html public/*.css public/*.svg dist/public/",
+    "test": "pnpm build && node --test dist/test.js",
+    "check": "pnpm typecheck && biome check .",
+    "format": "biome check --write ."
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.12",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

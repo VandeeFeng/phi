@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>φ PHI</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body data-mode="demo">
+    <header class="topbar">
+      <span class="brand">φ <span>PHI</span></span>
+      <span class="subtitle">Observe first. Intervene when needed.</span>
+      <details id="device-auth" data-state="signedOut" hidden>
+        <summary aria-controls="auth-menu">
+          <span id="auth-label" role="status" aria-live="polite">Pair device</span>
+        </summary>
+        <section id="auth-menu" aria-label="Device access">
+          <p id="auth-status" role="status" aria-live="polite"></p>
+          <form id="auth-form">
+            <input id="pairing-token" type="password" aria-label="Pairing token" placeholder="Pairing token" autocomplete="off" spellcheck="false" maxlength="64" />
+            <button id="auth-connect" type="submit" title="Register this device using the token from phi gateway token. Requires host approval.">Request pairing</button>
+            <button id="auth-recover" type="button" title="Replace an approved device's credential using the token from phi gateway token. Enter the token before clicking.">Recover credential</button>
+          </form>
+          <div class="auth-actions">
+            <button id="auth-reconnect" type="button" title="Reconnect using the saved device key and credential. No token or new approval needed.">Reconnect</button>
+            <button id="auth-cancel" type="button" title="Stop waiting and close this connection. Does not revoke host approval." hidden>Cancel wait</button>
+            <button id="auth-disconnect" type="button" title="Close this connection while keeping the saved device identity and credential." hidden>Disconnect</button>
+            <button id="auth-forget" type="button" title="Delete this browser's device key and credential. Ask the host operator to revoke the device's approval.">Forget</button>
+          </div>
+        </section>
+      </details>
+    </header>
+    <main>
+      <section class="workspace" aria-labelledby="office-title">
+        <div class="section-heading">
+          <div class="workspace-heading">
+            <h1 id="office-title">
+              WORKSPACE: <span id="workspace-path">Waiting for Phi</span>
+            </h1>
+            <p class="session-heading">
+              SESSION: <span id="session-name">Waiting for Phi</span> ·
+              <span id="session-id">—</span>
+            </p>
+            <p id="terminal-hint" class="session-heading" hidden>
+              Open this session in a terminal on this host:
+              <code id="terminal-command"></code>
+            </p>
+          </div>
+          <span id="office-summary"></span>
+        </div>
+        <div class="office-frame">
+          <div class="office">
+            <div class="back-wall" aria-hidden="true">
+              <span class="window"></span
+              ><span class="wall-sign">PHI<br />MAKE THINGS HAPPEN.</span
+              ><span class="window"></span>
+            </div>
+            <div class="floor">
+              <div class="office-corner" aria-hidden="true">
+                <span class="rug">Stay foolish, Stay simple</span>
+              </div>
+              <div id="desks" class="desks" aria-label="Agent desks"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <div class="office-status">
+        <span class="connection" role="status">CONNECTING</span>
+        <span id="view-notice" role="status"></span>
+        <button id="demo-toggle" type="button" aria-pressed="false">
+          Play demo
+        </button>
+        <div class="legend" aria-label="Status legend">
+          <span data-status="working">Working</span
+          ><span data-status="waiting">Waiting on agent</span
+          ><span data-status="blocked">Needs you</span
+          ><span data-status="idle">Idle</span
+          ><span data-status="error">Error</span
+          ><span data-status="stopped">Stopped</span>
+        </div>
+      </div>
+      <button
+        id="detail-toggle"
+        type="button"
+        aria-expanded="true"
+        aria-controls="agent-detail"
+        aria-label="Hide details"
+        title="Hide details"
+      ></button>
+      <aside id="agent-detail" class="detail" data-empty="true" aria-label="Agent details">
+        <div class="identity">
+          <img id="portrait" src="/office.svg#portrait-0" alt="" />
+          <div class="agent-info">
+            <h2 id="agent-name"></h2>
+            <span id="agent-role"></span>
+          </div>
+          <span class="idle-dots" role="img" aria-label="Ready to chat">
+            <span></span><span></span><span></span>
+          </span>
+        </div>
+        <div class="status-line">
+          <span id="agent-status" class="status"></span
+          ><span id="agent-model"></span>
+        </div>
+        <section class="activity-section">
+          <h3 id="activity-title">RECENT ACTIVITY</h3>
+          <ol id="activity"></ol>
+        </section>
+        <form id="message-form">
+          <div id="message-status" class="message-notifications" role="status" aria-atomic="true"></div>
+          <textarea
+            id="message"
+            aria-label="Message agent"
+            rows="3"
+            placeholder="Connect Phi to send an instruction…"
+            disabled
+          ></textarea>
+        </form>
+      </aside>
+    </main>
+    <footer>© Phi. All rights reserved</footer>
+  </body>
+</html>

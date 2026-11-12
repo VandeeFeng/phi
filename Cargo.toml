@@ -1,0 +1,10 @@
+[workspace]
+members = ["phi-sdk", "phi-interactive", "phi-tui", "phi-codemode", "phi-remote"]
+default-members = ["phi-interactive"]
+resolver = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,20 @@
+{
+  "challenge": {
+    "gatewayId": "gateway-fixture",
+    "bootId": "boot-fixture",
+    "connectionId": "connection-fixture",
+    "audience": "https://phi.example.com/ws",
+    "challengeId": "challenge-fixture",
+    "nonce": "nonce-fixture",
+    "deviceId": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+    "publicKey": [215,90,152,1,130,177,10,183,213,75,254,211,201,100,7,58,14,225,114,243,218,166,35,37,175,2,26,104,247,7,81,26],
+    "operation": "reconnect",
+    "requestId": null,
+    "expiresAt": 1900000000,
+    "authorizationId": "approval-fixture"
+  },
+  "credential": "fixture-not-a-real-credential",
+  "credentialDigest": "7c7f20bbb95ff6366600402dde59798c331241f8de42d60b45c0b31bc0dc6033",
+  "payload": "[\"phi.gateway.device-proof\",1,\"device\",\"gateway-fixture\",\"boot-fixture\",\"connection-fixture\",\"https://phi.example.com/ws\",\"challenge-fixture\",\"nonce-fixture\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",[215,90,152,1,130,177,10,183,213,75,254,211,201,100,7,58,14,225,114,243,218,166,35,37,175,2,26,104,247,7,81,26],\"reconnect\",null,1900000000,\"approval-fixture\",\"7c7f20bbb95ff6366600402dde59798c331241f8de42d60b45c0b31bc0dc6033\"]",
+  "signature": [40,164,92,90,21,93,29,226,241,181,227,111,2,253,196,169,105,115,249,234,156,47,212,141,83,30,42,250,185,236,124,203,130,186,109,113,210,99,243,70,186,60,173,84,197,58,211,147,221,252,103,229,63,129,139,89,43,93,139,97,43,166,165,3]
+}
