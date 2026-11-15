@@ -21,32 +21,6 @@ pub fn project_scope_root(cwd: impl AsRef<Path>) -> PathBuf {
     git_root(&cwd).unwrap_or_else(|| cwd.as_ref().to_path_buf())
 }
 
-pub fn new_worktree_path(
-    worktree_root: &Path,
-    branch: &str,
-    path_hint: &str,
-) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(
-        !branch.is_empty() && branch != "." && branch != ".." && !branch.contains(['/', '\\']),
-        "worktree branch must be a single path component"
-    );
-    let parent = worktree_root
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("worktree root has no parent directory"))?;
-    let name = worktree_root
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("worktree root has no directory name"))?;
-    let name = name
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("worktree root name must be UTF-8"))?;
-    let sibling_name = format!("{name}--{branch}");
-    anyhow::ensure!(
-        Path::new(path_hint) == Path::new("..").join(&sibling_name),
-        "requested worktree path must be ../{sibling_name}"
-    );
-    Ok(parent.join(sibling_name))
-}
-
 pub fn git_worktree_id(cwd: impl AsRef<Path>) -> Option<String> {
     let cwd = cwd.as_ref();
     let git_dir = PathBuf::from(exec_git_sync(
@@ -141,21 +115,6 @@ fn absolutize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::fs;
-
-    #[test]
-    fn new_worktree_path_requires_exact_sibling_and_single_component_branch() {
-        let root = Path::new("/tmp/phi");
-        assert_eq!(
-            new_worktree_path(root, "fix", "../phi--fix").unwrap(),
-            PathBuf::from("/tmp/phi--fix")
-        );
-        for branch in ["", ".", "..", "fix/subtask", "../outside", "fix\\subtask"] {
-            assert!(new_worktree_path(Path::new("/tmp/phi"), branch, "../phi--fix").is_err());
-        }
-        for hint in ["../other--fix", "/tmp/phi--fix", "../phi--fix/../other"] {
-            assert!(new_worktree_path(Path::new("/tmp/phi"), "fix", hint).is_err());
-        }
-    }
 
     #[test]
     fn identifies_main_and_linked_worktrees() {

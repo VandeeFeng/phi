@@ -74,13 +74,17 @@ pub(super) fn load_selected(
     for (resource, _) in policy.selected(crate::resources::ResourceKind::Skills) {
         load_file(
             &resource.path,
-            resolve_skill_source(&resource.path, SkillSource::User),
+            if resource.is_builtin() {
+                SkillSource::Builtin
+            } else {
+                SkillSource::User
+            },
             &mut result,
             resource.scope,
         );
     }
     if crate::security::is_read_only() {
-        load_unlinked_builtins(&mut result, Some(policy), declarations);
+        load_unlinked_builtins(&mut result, policy, declarations);
     }
     result.skills.retain(|skill| {
         skill.source != SkillSource::Builtin || builtin_skill_enabled(&skill.name, declarations)
@@ -90,7 +94,7 @@ pub(super) fn load_selected(
 
 fn load_unlinked_builtins(
     result: &mut LoadSkillsResult,
-    policy: Option<&crate::resources::ResourcePolicy>,
+    policy: &crate::resources::ResourcePolicy,
     declarations: &[BuiltinSkill],
 ) {
     use crate::resources::{Resource, Scope};
@@ -103,7 +107,7 @@ fn load_unlinked_builtins(
         let resource = Resource::builtin_skill(&name);
         if target.exists()
             || !builtin_skill_enabled(&name.to_string_lossy(), declarations)
-            || policy.is_some_and(|policy| !policy.enabled(&resource))
+            || !policy.enabled(&resource)
         {
             continue;
         }
@@ -320,17 +324,6 @@ pub fn expand_command(input: &str, skills: &[Skill]) -> Result<Option<String>, S
 
 fn global_skills_dir() -> PathBuf {
     crate::config::settings::phi_path().join("skills")
-}
-
-fn resolve_skill_source(path: &Path, default_source: SkillSource) -> SkillSource {
-    let Ok(target) = std::fs::canonicalize(path) else {
-        return default_source;
-    };
-    if target.starts_with(phi_sdk::workspace::builtin_skills_dir()) {
-        SkillSource::Builtin
-    } else {
-        default_source
-    }
 }
 
 fn load_file(
@@ -703,10 +696,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            resolve_skill_source(&target.join("SKILL.md"), SkillSource::User),
-            SkillSource::Builtin
-        );
+        let resource = crate::resources::Resource {
+            path: target.join("SKILL.md"),
+            kind: crate::resources::ResourceKind::Skills,
+            scope: crate::resources::Scope::Global,
+        };
+        assert!(resource.is_builtin());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

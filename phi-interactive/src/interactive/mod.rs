@@ -136,7 +136,6 @@ async fn run(
     startup_recovery.declarations = features.filter(startup_recovery.declarations);
     let mut capabilities = startup_recovery.declarations.capabilities;
     report_resource_diagnostics(&capabilities).await?;
-    let mut terminal_guard = TerminalGuard::enter()?;
     let commands = startup_recovery.declarations.commands;
     *session = startup_recovery.session;
     let mut state = state_from_session(
@@ -176,6 +175,13 @@ async fn run(
     components.models.start_updates(&agent_instance);
     let mut mcp_actions = mcp::PanelActions::default();
 
+    workspace
+        .poll_target(
+            &agent_instance,
+            subagents.render_target(&mut state, session),
+        )
+        .await;
+    let mut terminal_guard = TerminalGuard::enter()?;
     render_current_target(
         &mut renderer,
         &mut subagents,

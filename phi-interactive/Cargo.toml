@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "process", "fs", "net", "io-util", "signal"] }
 futures-util = "0.3"
 filetime = "0.2"
+notify = "8.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "env-filter",

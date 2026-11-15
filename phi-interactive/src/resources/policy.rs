@@ -130,12 +130,25 @@ impl Resource {
     }
 
     pub(crate) fn is_builtin(&self) -> bool {
-        self.builtin_extension().is_some()
-            || self.kind == ResourceKind::Skills
-                && self
-                    .path
-                    .to_str()
-                    .is_some_and(|path| path.starts_with(BUILTIN_SKILLS_PREFIX))
+        self.builtin_extension().is_some() || self.builtin_skill_identity().is_some()
+    }
+
+    fn builtin_skill_identity(&self) -> Option<PathBuf> {
+        if self.kind != ResourceKind::Skills {
+            return None;
+        }
+        if self
+            .path
+            .to_str()
+            .is_some_and(|path| path.starts_with(BUILTIN_SKILLS_PREFIX))
+        {
+            return Some(self.path.clone());
+        }
+        let canonical = self.path.canonicalize().ok()?;
+        let relative = canonical
+            .strip_prefix(phi_sdk::workspace::builtin_skills_dir())
+            .ok()?;
+        Some(PathBuf::from(BUILTIN_SKILLS_PREFIX).join(relative))
     }
 
     pub(crate) fn builtin_extension(&self) -> Option<phi_sdk::extension::BuiltinExtension> {
@@ -247,9 +260,7 @@ impl ResourcePolicy {
 
     fn absolute_path(&self, resource: &Resource) -> PathBuf {
         let path = &resource.path;
-        if resource.kind == ResourceKind::Skills
-            && let Some(identity) = builtin_skill_identity(path)
-        {
+        if let Some(identity) = resource.builtin_skill_identity() {
             return identity;
         }
         if path
@@ -329,13 +340,7 @@ impl ResourcePolicy {
         resource: &Resource,
         scope: Scope,
     ) -> Option<&'static str> {
-        if resource.kind != ResourceKind::Skills {
-            return None;
-        }
-        let path = self.absolute_path(resource);
-        if !path.to_string_lossy().starts_with(BUILTIN_SKILLS_PREFIX) {
-            return None;
-        }
+        let path = resource.builtin_skill_identity()?;
         let builtin_settings = |settings: &ResourceSettings| crate::config::Settings {
             extensions: Some(settings.extensions.clone()),
             memory: settings.memory.clone(),
@@ -396,11 +401,11 @@ impl ResourcePolicy {
             Scope::Project => self.project_dir.join("settings.json"),
         };
         let key = resource.kind.key();
-        let absolute_path = self.absolute_path(resource);
         let matcher = self.rule_matcher(resource, scope);
-        let target = absolute_path
-            .strip_prefix(self.base(scope))
-            .unwrap_or(&absolute_path)
+        let target = matcher
+            .path
+            .strip_prefix(matcher.base)
+            .unwrap_or(&matcher.path)
             .to_string_lossy()
             .into_owned();
         let entries = crate::config::SettingsManager::update_file(&path, |root| {
@@ -591,17 +596,6 @@ fn normalize_path(path: PathBuf) -> PathBuf {
         }
     }
     normalized
-}
-
-fn builtin_skill_identity(path: &Path) -> Option<PathBuf> {
-    let canonical = path.canonicalize().ok()?;
-    let relative = canonical
-        .strip_prefix(phi_sdk::workspace::builtin_skills_dir())
-        .ok()?;
-    Some(PathBuf::from(format!(
-        "builtin:skills/{}",
-        relative.to_string_lossy()
-    )))
 }
 
 fn exact_match(path: &Path, entry: &str, base: &Path, kind: ResourceKind) -> bool {
@@ -812,6 +806,12 @@ mod tests {
                 scope: Scope::Project,
                 ..builtin.clone()
             };
+            proptest::prop_assert!(builtin.is_builtin());
+            proptest::prop_assert!(!user.is_builtin());
+            for kind in [ResourceKind::Extensions, ResourceKind::Prompts] {
+                let other = Resource { kind, ..builtin.clone() };
+                proptest::prop_assert!(!other.is_builtin());
+            }
             for legacy in [
                 format!("skills/{name}/SKILL.md"),
                 policy.global_dir.join(format!("skills/{name}/SKILL.md")).display().to_string(),

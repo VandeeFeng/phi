@@ -193,6 +193,7 @@ struct LocalAttachment {
     session: SessionAccess,
     preparation: Arc<RuntimePreparation>,
     snapshots: AgentSnapshotSubscription,
+    workspace: Arc<tokio::sync::Mutex<super::workspace::WorkspaceCache>>,
 }
 
 fn local_subscription(session: &SessionAccess) -> broadcast::Receiver<AgentEvent> {
@@ -455,6 +456,7 @@ impl AgentAttachment {
                 session,
                 preparation,
                 snapshots: instance.subscribe_snapshots(),
+                workspace: Arc::default(),
             }),
         }
     }
@@ -902,7 +904,13 @@ impl AgentAttachment {
             let view = self.subagent_view(&link.child_agent_id).await?;
             std::path::PathBuf::from(view.session.working_dir.as_str())
         };
-        Ok(crate::runtime::WorkspaceView::observe(working_dir).await)
+        Ok(self
+            .local()?
+            .workspace
+            .lock()
+            .await
+            .observe(&working_dir)
+            .await)
     }
 
     pub(crate) async fn session(&self) -> anyhow::Result<Session> {

@@ -6,7 +6,7 @@ use crate::session::Session;
 
 use super::state::UiState;
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(super) fn git_branch<'a>(state: &'a UiState, session: &Session) -> Option<&'a str> {
     state
@@ -55,8 +55,15 @@ impl WorkspaceRefresh {
             }
             self.attachment_id = Some(attachment.id().clone());
             self.session_id = Some(session.id.to_string());
-            self.next_refresh = None;
-            changed |= state.workspace.take().is_some();
+            state.workspace = attachment
+                .workspace(session.id.as_str())
+                .await
+                .ok()
+                .filter(|view| {
+                    view.working_dir == std::path::Path::new(session.working_dir.as_str())
+                });
+            self.next_refresh = Some(Instant::now() + REFRESH_INTERVAL);
+            return true;
         }
         if self.task.as_ref().is_some_and(|task| task.is_finished()) {
             if let Ok(Ok(view)) = self.task.take().unwrap().await
@@ -84,7 +91,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn workspace_follows_display_target_and_discards_stale_results() {
+    async fn footer_follows_display_target_without_starting_saved_children() {
         let (directory, policy, runtime) =
             crate::runtime::preparation::tests::session_test_runtime();
         policy.install(&runtime.preparation);
@@ -144,12 +151,7 @@ mod tests {
                 .session_access(other_binding.instance().id()),
             runtime.preparation.clone(),
         );
-        let mut refresh = WorkspaceRefresh {
-            attachment_id: Some(attachment.id().clone()),
-            session_id: Some("previous".into()),
-            next_refresh: None,
-            task: None,
-        };
+        let mut refresh = WorkspaceRefresh::default();
         let mut state = UiState::default();
         let mut conversation =
             super::super::components::conversation::ConversationView::child_from_session(
@@ -184,15 +186,10 @@ mod tests {
                 }
             };
             assert!(refresh.poll_target(attachment, target).await);
-            assert!(state.workspace.is_none());
-            tokio::time::timeout(Duration::from_secs(3), async {
-                while state.workspace.is_none() {
-                    tokio::task::yield_now().await;
-                    refresh.poll(attachment, session, &mut state).await;
-                }
-            })
-            .await
-            .unwrap();
+            assert!(
+                state.workspace.is_some(),
+                "first frame needs a workspace observation"
+            );
             assert_eq!(
                 state.workspace.as_ref().unwrap().working_dir,
                 std::path::Path::new(session.working_dir.as_str())
@@ -205,21 +202,40 @@ mod tests {
                     None
                 }
             );
-            let accepted = state.workspace.clone();
-            let foreign = WorkspaceView {
-                working_dir: directory.join("foreign"),
-                git_branch: Some("foreign".into()),
-            };
-            state.workspace = Some(foreign.clone());
-            assert_eq!(git_branch(&state, session), None);
-            state.workspace = accepted.clone();
-            refresh.task = Some(tokio::spawn(async move { Ok(foreign) }));
-            while !refresh.task.as_ref().unwrap().is_finished() {
-                tokio::task::yield_now().await;
-            }
-            assert!(!refresh.poll(attachment, session, &mut state).await);
-            assert_eq!(state.workspace, accepted);
         }
+
+        refresh.poll(&attachment, &child, &mut state).await;
+        assert!(
+            std::process::Command::new("git")
+                .args(["symbolic-ref", "HEAD", "refs/heads/updated-child"])
+                .current_dir(&child_directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(Duration::from_millis(1500), async {
+            while git_branch(&state, &child) != Some("updated-child") {
+                refresh.poll(&attachment, &child, &mut state).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the displayed footer must refresh without changing targets");
+
+        let accepted = state.workspace.clone();
+        let foreign = WorkspaceView {
+            working_dir: directory.join("foreign"),
+            git_branch: Some("foreign".into()),
+        };
+        state.workspace = Some(foreign.clone());
+        assert_eq!(git_branch(&state, &child), None);
+        state.workspace = accepted.clone();
+        refresh.task = Some(tokio::spawn(async move { Ok(foreign) }));
+        while !refresh.task.as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!refresh.poll(&attachment, &child, &mut state).await);
+        assert_eq!(state.workspace, accepted);
         assert!(
             runtime
                 .manager

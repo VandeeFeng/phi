@@ -52,8 +52,7 @@ pub mod workspace {
         phi_session_root, session_scope_dir,
     };
     pub use crate::utils::workspace::{
-        ProjectMeta, get_project_meta, git_root, git_worktree_id, new_worktree_path,
-        project_scope_root,
+        ProjectMeta, get_project_meta, git_root, git_worktree_id, project_scope_root,
     };
 }
 
