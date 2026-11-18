@@ -130,7 +130,7 @@ The history window is byte-budgeted by expanded footprint, independent of paint-
 
 ## Terminal lifecycle
 
-`TerminalGuard` owns terminal mode setup/cleanup through RAII, including partial startup failure. Keyboard protocol changes are balanced and limited to consumed events. Applications stop input reporting before awaiting shutdown, retaining raw mode so repeated input cannot interrupt persistence. Final cleanup discards pending TUI input before restoring raw mode. Platform/protocol details belong to [terminal guard](../../phi-tui/src/terminal/guard.rs).
+`TerminalGuard` owns terminal mode setup/cleanup through RAII, including partial startup failure. Keyboard protocol changes are balanced and limited to consumed events. Applications choose when to stop input reporting; shutdown may retain input and raw mode for explicit escalation. The interactive application's wait/warn/force-exit policy belongs to its [event loop](../design-interactive.md#interactive-event-loop). Final cleanup discards pending TUI input before restoring raw mode. Platform/protocol details belong to [terminal guard](../../phi-tui/src/terminal/guard.rs).
 
 Crossterm events normalize into the small `KeyInput` vocabulary before runtime or widget routing. This keeps reusable widgets independent from raw terminal event details. `poll_key_input_with_timeout` and `TuiRuntime::poll_event_with_timeout` accept caller-supplied wait durations; zero is nonblocking, and convenience methods use 50ms. Wake cadence and async orchestration remain application-owned.
 

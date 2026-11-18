@@ -95,6 +95,7 @@ pub struct ChildSessionLink {
     pub parent_tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<phi_sdk::workflow::WorkflowRunId>,
+    pub(crate) mode: phi_sdk::agent_manager::DelegationMode,
     // Terminal Workflow records own results; parent journals retain only links.
     #[serde(skip)]
     pub(crate) recovered_outcome: Option<SubagentOutcome>,
@@ -136,14 +137,17 @@ impl ChildSessionLink {
             alias: creation.alias().map(|alias| alias.as_str().to_owned()),
             parent_tool_call_id: None,
             workflow_run_id: creation.workflow_run_id(),
+            mode: creation.mode(),
             recovered_outcome: None,
         }
     }
 }
 
-impl From<&SubagentChildLink> for ChildSessionLink {
-    fn from(link: &SubagentChildLink) -> Self {
-        Self {
+impl TryFrom<&SubagentChildLink> for ChildSessionLink {
+    type Error = anyhow::Error;
+
+    fn try_from(link: &SubagentChildLink) -> anyhow::Result<Self> {
+        Ok(Self {
             child_session_id: link.child_session_id.clone(),
             child_agent_id: link.child_agent_id.clone(),
             child_working_dir: link.child_working_dir.clone(),
@@ -151,8 +155,11 @@ impl From<&SubagentChildLink> for ChildSessionLink {
             alias: link.alias.clone(),
             parent_tool_call_id: link.parent_tool_call_id.clone(),
             workflow_run_id: None,
+            mode: link
+                .mode
+                .ok_or_else(|| anyhow::anyhow!("child delegation mode is required"))?,
             recovered_outcome: None,
-        }
+        })
     }
 }
 
@@ -170,7 +177,7 @@ impl From<&ChildSessionLink> for SubagentChildLink {
                 .clone()
                 .unwrap_or(SubagentOutcome::Interrupted),
             admission: phi_sdk::agents::SubagentAdmission::Accepted,
-            mode: None,
+            mode: Some(link.mode),
         }
     }
 }

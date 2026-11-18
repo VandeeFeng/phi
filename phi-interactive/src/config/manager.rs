@@ -36,7 +36,7 @@ impl SettingsManager {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             working_dir: Arc::new(std::path::absolute(working_dir)?),
-            project_scope: settings::project_scope_dir_for(working_dir),
+            project_scope: settings::project_scope_dir_for(working_dir)?,
             state: Arc::new(RwLock::new(Self::resolve(working_dir, global, project)?)),
         })
     }
@@ -73,7 +73,9 @@ impl SettingsManager {
         &self,
         working_dir: &Path,
     ) -> anyhow::Result<Option<HookTrust>> {
-        let root = phi_sdk::workspace::project_scope_root(working_dir).canonicalize()?;
+        let root = phi_sdk::workspace::WorkspaceMeta::discover(working_dir, None)?
+            .root
+            .canonicalize()?;
         let state = self
             .state
             .read()
@@ -106,7 +108,9 @@ impl SettingsManager {
         decision: HookTrust,
     ) -> anyhow::Result<()> {
         self.check_scope(working_dir)?;
-        let root = phi_sdk::workspace::project_scope_root(working_dir).canonicalize()?;
+        let root = phi_sdk::workspace::WorkspaceMeta::discover(working_dir, None)?
+            .root
+            .canonicalize()?;
         let mut state = self
             .state
             .write()
@@ -146,7 +150,7 @@ impl SettingsManager {
     }
 
     pub(crate) fn matches_scope(&self, working_dir: &Path) -> bool {
-        settings::project_scope_dir_for(working_dir) == self.project_scope
+        settings::project_scope_dir_for(working_dir).is_ok_and(|scope| scope == self.project_scope)
     }
 
     pub(crate) fn reload(&self) -> anyhow::Result<()> {
@@ -376,6 +380,7 @@ mod tests {
         use serde_json::json;
 
         let root = Path::new("/tmp").join(format!("phi-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
         let global: Settings = serde_json::from_value(json!({
             "codemode": {"inlineBudget": 17},
             "memory": {"tape": {"onlyGit": false}},
@@ -396,6 +401,7 @@ mod tests {
             assert!(!settings.memory.unwrap().tape_enabled());
             assert_eq!(settings.sandbox.unwrap().enabled, Some(false));
         }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -451,6 +457,7 @@ mod tests {
     #[test]
     fn command_hooks_require_global_registration() {
         let root = Path::new("/tmp").join(format!("phi-hook-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
         let global: Settings = serde_json::from_value(serde_json::json!({
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
                 {"type": "command", "command": "exit 2"}
@@ -467,11 +474,13 @@ mod tests {
         let project: Settings = serde_json::from_value(serde_json::json!({"hooks": {}})).unwrap();
         let manager = SettingsManager::from_settings(&root, global, project).unwrap();
         assert!(!manager.settings().hooks.unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn shared_manager_keeps_sources_and_rejects_wrong_scope() {
         let root = Path::new("/tmp").join(format!("phi-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
         let manager = SettingsManager::from_settings(
             &root,
             serde_json::from_value(serde_json::json!({
@@ -493,5 +502,6 @@ mod tests {
         settings.default_model = Some("edited".into());
         assert_eq!(manager.settings().default_model(), Some("project"));
         assert!(manager.resource_policy_for(&root.join("other")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

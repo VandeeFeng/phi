@@ -129,6 +129,7 @@ fn tool_invocation_input(name: &str, value: &serde_json::Value) -> Option<String
             .and_then(|value| value.as_str())
             .map(|command| format!("{{{command}}}")),
         ("read" | "Read", Some(path)) => Some(format_read_input(path, value)),
+        ("edit" | "Edit", Some(path)) => Some(format!("{{{path}}}")),
         (_, Some(path)) => Some(path.to_string()),
         _ => None,
     }
@@ -204,7 +205,7 @@ mod tests {
                 "Read",
                 "{README.md:2-4}",
             ),
-            ("Edit", r#"{"path":"src/main.rs"}"#, "Edit", "src/main.rs"),
+            ("Edit", r#"{"path":"src/main.rs"}"#, "Edit", "{src/main.rs}"),
             (
                 "ToolSearch",
                 r#"{"query":"docs"}"#,

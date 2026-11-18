@@ -341,6 +341,7 @@ mod tests {
     fn mounted_config_emits_write_intent_and_preserves_draft_on_failure() {
         let directory = std::path::PathBuf::from("/tmp")
             .join(format!("phi-config-widget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
         let project_scope = directory.join(".phi");
         let policy = ResourcePolicy::load_for(&directory).unwrap();
         let resource = Resource {
@@ -414,6 +415,7 @@ mod tests {
     fn builtin_section_supports_search_and_project_toggles() {
         let directory = std::path::Path::new("/tmp")
             .join(format!("phi-builtin-screen-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
         let policy = ResourcePolicy::load_for(&directory).unwrap();
         let resources = policy
             .discover()
@@ -549,6 +551,7 @@ mod tests {
     fn unavailable_skills_keep_their_configured_checkmark() {
         let directory =
             std::path::Path::new("/tmp").join(format!("phi-skill-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
         let global = serde_json::from_value::<crate::config::Settings>(serde_json::json!({
             "memory": { "enabled": true },
             "extensions": ["-builtin:memory"],

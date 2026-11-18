@@ -88,16 +88,14 @@ impl WorkflowStatusView {
             .iter()
             .map(|view| view.snapshot.invocations().len())
             .sum();
-        let mut lines = Vec::new();
-        if running > 0 {
-            lines.push(
-                StyledLine::new(
-                    format!("Workflows · {running} running · {settled}/{requested} settled"),
-                    ThemeColor::Dim,
-                )
-                .fit(width),
-            );
-        }
+        let mut lines = vec![
+            StyledLine::new(String::new(), ThemeColor::Dim).fit(width),
+            StyledLine::new(
+                format!("Workflows · {running} running · {settled}/{requested} settled"),
+                ThemeColor::Dim,
+            )
+            .fit(width),
+        ];
         for view in views.iter().take(MAX_VISIBLE_RUNS) {
             let snapshot = &view.snapshot;
             let (marker, color, label) = match snapshot.status() {
@@ -122,11 +120,6 @@ impl WorkflowStatusView {
                     summary.push_str(&short_text(error));
                 }
             } else {
-                summary.push_str(&format!(
-                    " · {}/{} settled",
-                    snapshot.completed(),
-                    snapshot.invocations().len()
-                ));
                 if snapshot.status() == WorkflowStatus::Completed
                     && let Some(value) = snapshot.value()
                 {
@@ -150,7 +143,7 @@ impl WorkflowStatusView {
                 StyledLine::segments([
                     ("  ".to_owned(), ThemeColor::Dim),
                     (marker.to_owned(), color),
-                    (format!(" {summary}"), ThemeColor::Default),
+                    (format!(" {summary}"), ThemeColor::Dim),
                 ])
                 .fit(width),
             );
@@ -225,6 +218,40 @@ impl WorkflowRefresh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_status_rows(state: &UiState) {
+        let lines = state.workflows.lines(160);
+        assert!(lines[0].text.trim().is_empty());
+        assert!(lines[1].text.starts_with("Workflows · "));
+        assert_eq!(lines[1].fg, ThemeColor::Dim);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.text.contains("settled"))
+                .count(),
+            1
+        );
+        for line in lines.iter().skip(2) {
+            assert!(!line.segments.is_empty());
+            let expected = StyledLine::segments([(line.text[5..].trim_end(), ThemeColor::Dim)]);
+            assert_eq!(line.segments.get(2), expected.segments.first());
+        }
+        let theme = phi_tui::Theme::default();
+        let status = crate::interactive::components::status::render(
+            state,
+            &phi_tui::RenderContext::width(160, &theme),
+        );
+        assert_eq!(&status[..lines.len()], lines.as_slice());
+        for width in 0..=160 {
+            assert!(
+                state
+                    .workflows
+                    .lines(width)
+                    .iter()
+                    .all(|line| { phi_tui::text::display_width(&line.text) <= usize::from(width) })
+            );
+        }
+    }
+
     #[tokio::test]
     async fn status_respects_admission() {
         use phi_sdk::hooks::Hook;
@@ -306,10 +333,16 @@ mod tests {
         )
         .await
         .unwrap();
+        let failed = WorkflowRequest::parse(
+            "export const meta = {name: 'failed', description: 'failed status'}; throw new Error('failure');",
+            None,
+        )
+        .await
+        .unwrap();
         let mut state = UiState::default();
         state.features.workflow_observation = true;
         let mut refresh = WorkflowRefresh::default();
-        for _ in 0..2 {
+        for (request, conclusion) in [(request, "done"), (failed, "failure")] {
             let previous = state.workflows.observed_runs(&attachment);
             let run = binding
                 .launch_workflow(
@@ -333,12 +366,14 @@ mod tests {
             state.workflows.dismiss_settled(&attachment, &previous);
             assert_eq!(state.workflows.views.len(), 1);
             assert_eq!(state.workflows.views[0].snapshot.id(), run.id());
+            assert_status_rows(&state);
+            assert!(state.workflows.lines(160)[1].text.contains("0 running"));
             assert!(
                 state
                     .workflows
                     .lines(80)
                     .iter()
-                    .any(|line| line.text.contains("done"))
+                    .any(|line| line.text.contains(conclusion))
             );
         }
         for (prompt, directed, expected) in [
@@ -394,6 +429,8 @@ mod tests {
             state.workflows.views[0].snapshot.status(),
             WorkflowStatus::Running
         );
+        assert_status_rows(&state);
+        assert!(state.workflows.lines(160)[1].text.contains("1 running"));
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(
                 crate::interactive::agent::submit_prompt(

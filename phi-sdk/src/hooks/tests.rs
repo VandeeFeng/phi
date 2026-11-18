@@ -1112,6 +1112,189 @@ mod hooks_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn background_teardown_cancels_readiness_and_notifications() {
+        let startup_entered = Arc::new(tokio::sync::Notify::new());
+        let notification_entered = Arc::new(tokio::sync::Notify::new());
+        let startup_dropped = tokio_util::sync::CancellationToken::new();
+        let notification_dropped = tokio_util::sync::CancellationToken::new();
+        let mut hooks = HookRegistry::new();
+        hooks.register_hook(Hook::session_start_with_mode(
+            SessionStartMode::BeforeFirstPrompt,
+            |_| async {
+                Ok(vec![HookNotice::Info {
+                    message: "completed startup".into(),
+                }])
+            },
+        ));
+        hooks.register_hook(Hook::session_start_with_mode(
+            SessionStartMode::BeforeFirstPrompt,
+            {
+                let entered = startup_entered.clone();
+                let dropped = startup_dropped.clone();
+                move |_| {
+                    let entered = entered.clone();
+                    let guard = dropped.clone().drop_guard();
+                    async move {
+                        let _guard = guard;
+                        entered.notify_one();
+                        std::future::pending().await
+                    }
+                }
+            },
+        ));
+        hooks.register_hook(Hook::notification({
+            let entered = notification_entered.clone();
+            let dropped = notification_dropped.clone();
+            move |_| {
+                let entered = entered.clone();
+                let guard = dropped.clone().drop_guard();
+                async move {
+                    let _guard = guard;
+                    entered.notify_one();
+                    std::future::pending().await
+                }
+            }
+        }));
+        let hooks = Arc::new(hooks);
+        emit_session_start(&hooks, SessionStartReason::Startup, None).await;
+        notify_completion(&hooks, "done");
+        startup_entered.notified().await;
+        notification_entered.notified().await;
+        let readiness = tokio::spawn({
+            let hooks = hooks.clone();
+            async move { hooks.ready().await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(hooks.running_hook_count(), 2);
+        let started = tokio::time::Instant::now();
+        hooks.cancel_background_hooks().await;
+        readiness.await.unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(startup_dropped.is_cancelled());
+        assert!(notification_dropped.is_cancelled());
+        assert_eq!(hooks.running_hook_count(), 0);
+        let notices = hooks.take_notices();
+        for event in ["SessionStart", "Notification"] {
+            assert!(notices.contains(&HookNotice::Cancelled {
+                event: event.into(),
+            }));
+        }
+        assert!(notices.contains(&HookNotice::Info {
+            message: "completed startup".into(),
+        }));
+        assert_eq!(notices.len(), 3);
+        let cancelled = HookNotice::Cancelled {
+            event: "Notification".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(cancelled).unwrap()["kind"],
+            "cancelled"
+        );
+
+        notify_completion(&hooks, "after teardown");
+        hooks.cancel_background_hooks().await;
+        assert!(hooks.take_notices().is_empty());
+        let next = hooks.for_generation();
+        notify_completion(&next, "new generation");
+        notification_entered.notified().await;
+        assert_eq!(next.running_hook_count(), 1);
+        next.cancel_background_hooks().await;
+        assert_eq!(next.running_hook_count(), 0);
+        assert!(hooks.take_notices().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_teardown_kills_hook_process() {
+        let root =
+            PathBuf::from("/tmp").join(format!("phi-hook-teardown-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let mut hooks = HookRegistry::new();
+        hooks.register_hook(Hook::notification({
+            let root = root.clone();
+            let pid_file = pid_file.clone();
+            move |_| {
+                let root = root.clone();
+                let pid_file = pid_file.clone();
+                async move {
+                    let sandbox = crate::sandbox::Sandbox::new(false, root).unwrap();
+                    crate::utils::process::run(
+                        &sandbox,
+                        "bash",
+                        &[
+                            "-c".into(),
+                            "echo $$ > \"$1\"; sleep 30".into(),
+                            "--".into(),
+                            pid_file.display().to_string(),
+                        ],
+                        None,
+                        Duration::from_secs(60),
+                    )
+                    .await
+                    .map_err(|error| HookError::new(error.to_string()))?;
+                    Ok(())
+                }
+            }
+        }));
+        notify_completion(&hooks, "done");
+        let process_id: i32 = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), hooks.cancel_background_hooks())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(process_id, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled hook process survived teardown");
+        assert_eq!(
+            hooks.take_notices(),
+            [HookNotice::Cancelled {
+                event: "Notification".into(),
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_hooks_release_only_their_generation_counts() {
+        for count in 1..=3 {
+            let mut hooks = HookRegistry::new();
+            for _ in 0..count {
+                hooks.register_hook(Hook::session_end(|_| std::future::pending()));
+            }
+            let mut ending = Box::pin(emit_session_end(&hooks, SessionEndReason::Quit, None));
+            assert!(futures::poll!(ending.as_mut()).is_pending());
+            assert_eq!(hooks.running_hook_count(), count);
+
+            let next = hooks.for_generation();
+            assert_eq!(next.running_hook_count(), 0);
+            let mut next_ending = Box::pin(emit_session_end(&next, SessionEndReason::Quit, None));
+            assert!(futures::poll!(next_ending.as_mut()).is_pending());
+            assert_eq!(next.running_hook_count(), count);
+
+            drop(ending);
+            assert_eq!(hooks.running_hook_count(), 0);
+            assert_eq!(next.running_hook_count(), count);
+            drop(next_ending);
+            assert_eq!(next.running_hook_count(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn session_end_does_not_wait_for_startup_readiness() {
         let mut hooks = HookRegistry::new();
         hooks.register_hook(Hook::session_start_with_mode(
@@ -1156,17 +1339,23 @@ mod hooks_tests {
                 }
             }));
         }
-        let ending = tokio::spawn(async move {
-            emit_session_end(&hooks, SessionEndReason::Quit, None).await;
-            hooks.take_notices()
+        let hooks = Arc::new(hooks);
+        let ending = tokio::spawn({
+            let hooks = hooks.clone();
+            async move {
+                emit_session_end(&hooks, SessionEndReason::Quit, None).await;
+                hooks.take_notices()
+            }
         });
         tokio::task::yield_now().await;
+        assert_eq!(hooks.running_hook_count(), 2);
         tokio::time::advance(DEFAULT_SESSION_END_TIMEOUT).await;
         let notices = tokio::time::timeout(std::time::Duration::from_millis(100), ending)
             .await
             .expect("SessionEnd exceeded the shared budget")
             .unwrap();
         assert_eq!(completed.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(hooks.running_hook_count(), 0);
         assert!(notices.is_empty());
     }
 
@@ -1193,6 +1382,7 @@ mod hooks_tests {
             let started = tokio::time::Instant::now();
             emit_session_end(&hooks, SessionEndReason::Quit, None).await;
             assert_eq!(started.elapsed(), budget.min(hook_timeout));
+            assert_eq!(hooks.running_hook_count(), 0);
             let notices = hooks.take_notices();
             if hook_timeout < budget {
                 assert!(matches!(

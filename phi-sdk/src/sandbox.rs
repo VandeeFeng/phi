@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use anyhow::Context;
 use tokio::process::Command;
 
-use crate::utils::{path::expand_home_path, workspace::get_project_meta};
+use crate::utils::{path::expand_home_path, workspace::WorkspaceMeta};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlacklistedPath {
@@ -424,7 +424,7 @@ fn resolve_directories(working_directory: PathBuf) -> anyhow::Result<(PathBuf, P
     if !working_directory.is_dir() {
         anyhow::bail!("sandbox working directory is not a directory");
     }
-    let project = get_project_meta(&working_directory);
+    let project = WorkspaceMeta::discover(&working_directory, None)?;
     let project_directory =
         std::fs::canonicalize(&project.root).context("invalid sandbox project directory")?;
     if !working_directory.starts_with(&project_directory) {

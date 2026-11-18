@@ -935,11 +935,13 @@ mod tests {
             alias: Some("security".into()),
             parent_tool_call_id: Some("agent-call".into()),
             workflow_run_id: None,
+            mode: phi_sdk::agent_manager::DelegationMode::Background,
             recovered_outcome: None,
         };
         child.bind_test_parent(&parent);
         parent.children.push(link.clone());
         let saved_link = serde_json::to_value(&parent).unwrap()["children"][0].clone();
+        assert_eq!(saved_link["mode"], "background");
         for field in [
             "outcome",
             "admission",

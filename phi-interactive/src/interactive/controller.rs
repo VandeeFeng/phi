@@ -108,10 +108,36 @@ impl InteractiveController<'_> {
         match intent {
             switch::SwitchIntent::Updated => {}
             switch::SwitchIntent::Select(name) => self.select_switch(name).await,
-            switch::SwitchIntent::SelectThenConfigure(name) => {
-                self.select_switch(name).await;
-                self.switches.open_configuration(self.state);
+            switch::SwitchIntent::Apply(settings) => self.apply_switch_config(settings).await,
+        }
+    }
+
+    async fn apply_switch_config(&mut self, settings: crate::config::SwitchSettings) {
+        if !self.require_idle("apply Switch configuration") {
+            return;
+        }
+        match self
+            .agent_instance
+            .apply_switch_config(settings.switches.clone())
+            .await
+        {
+            Ok(accepted) => {
+                install_runtime_update(
+                    self.capabilities,
+                    self.state,
+                    self.session,
+                    accepted,
+                    "Switch configuration",
+                );
+                switch::save_switches(&settings, self.state);
+                self.models
+                    .refresh_completions(self.agent_instance, self.state, self.session)
+                    .await;
             }
+            Err(error) => self.state.notify(
+                phi_tui::NotifyKind::Error,
+                format!("Switch configuration failed: {error}"),
+            ),
         }
     }
 
@@ -177,6 +203,9 @@ impl InteractiveController<'_> {
             accepted,
             "reload",
         );
+        self.models
+            .refresh_completions(self.agent_instance, self.state, self.session)
+            .await;
         self.state
             .notify(phi_tui::NotifyKind::Info, "Resources reloaded");
     }
@@ -259,6 +288,9 @@ impl InteractiveController<'_> {
             }
             BuiltinCommand::Model(ModelCommand::Update) => {
                 self.models.update_catalog(self.state);
+            }
+            BuiltinCommand::Model(ModelCommand::Set(selection)) => {
+                self.select_model(selection).await;
             }
             BuiltinCommand::Tasks => super::overlays::open_tasks(self.state),
             BuiltinCommand::Workflow => {
@@ -517,6 +549,9 @@ impl InteractiveController<'_> {
                     accepted,
                     "runtime",
                 );
+                self.models
+                    .refresh_completions(self.agent_instance, self.state, self.session)
+                    .await;
                 if !thinking_selection {
                     self.state.editor.clear();
                 }
@@ -550,6 +585,9 @@ impl InteractiveController<'_> {
             tool_names.unwrap_or_default(),
         );
         release_transcript_snapshot(self.session);
+        self.models
+            .refresh_completions(self.agent_instance, self.state, self.session)
+            .await;
         for warning in warnings {
             self.state.notify(phi_tui::NotifyKind::Warning, warning);
         }

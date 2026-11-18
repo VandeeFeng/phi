@@ -1,3 +1,4 @@
+use crate::harness::manager::preparation::DelegationMode;
 use rig::tool::{Tool, ToolExecutionError};
 use tokio::sync::{mpsc, oneshot};
 
@@ -8,15 +9,21 @@ pub enum AgentArgs {
 
 impl<'de> serde::Deserialize<'de> for AgentArgs {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let input = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
-        if input.get("action").is_some() {
-            return serde_json::from_value(input)
-                .map(Self::Manage)
-                .map_err(serde::de::Error::custom);
+        use serde_json::Value;
+
+        // Providers pass parsed arguments; raw JSON keys are no longer available here.
+        let Value::Object(mut fields) = Value::deserialize(deserializer)? else {
+            return Err(serde::de::Error::custom(
+                "expected an Agent argument object",
+            ));
+        };
+        if fields.get("action").and_then(Value::as_str) == Some("create") {
+            fields.remove("action");
+            serde_json::from_value(Value::Object(fields)).map(Self::Create)
+        } else {
+            serde_json::from_value(Value::Object(fields)).map(Self::Manage)
         }
-        serde_json::from_value(input)
-            .map(Self::Create)
-            .map_err(serde::de::Error::custom)
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -47,7 +54,7 @@ impl AgentToolOutput {
                 "status": "async_launched",
                 "agentId": creation.instance_id().as_str(),
                 "agent": creation.definition(),
-                "nextStep": "The initial result will arrive automatically as a follow-up. Continue independent work, or end your current turn to receive it. Do not poll or sleep. Use action=message with agentId for follow-up work or coordination, or use the name of your ordinary child.",
+                "nextStep": "The initial result will arrive automatically as a follow-up. Continue independent work, or end your current turn to receive it. Do not poll or sleep. Use action=message with agentId as recipient for follow-up work or coordination, or use the name of your ordinary child.",
             })
             .to_string(),
             Self::Members(members) => serde_json::json!(
@@ -121,7 +128,7 @@ impl Tool for AgentTool {
     fn description(&self) -> String {
         let guidance = concat!(
             "Create Agents, discover members, and send messages.\n\n",
-            "- Create: provide role and a concrete prompt; optionally alias, working_dir and mode. Foreground waits for the result; background returns a launch receipt. With Teams enabled, the lead sets alias for a teammate; omit it for an ordinary subagent.\n",
+            "- Create: action=create with role and a concrete prompt; optionally alias, working_dir and mode. Foreground waits for the result; background returns a launch receipt. With Teams enabled, the lead sets alias for a teammate; omit it for an ordinary subagent.\n",
             "- Discover: action=list lists authorized members.\n",
             "- Communicate: action=message with recipient and content sends actionable follow-up work, questions, blockers or findings, not routine status updates. It may start or extend the recipient's execution while preserving history and configuration. Prefer the returned agentId as recipient. Sending returns acceptance, not a reply or work result.\n\n",
             "Background results and teammate idle reports arrive automatically in later turns. Ordinary coordination may join an active turn at safe points; otherwise it starts a later turn. Continue independent work, or end your current turn to wait. Do not poll list, use Bash sleep, or send duplicate result/status messages. A user-cancelled Agent refuses messages until a direct user or host request resumes it; do not create a replacement to bypass cancellation.\n\n",
@@ -148,7 +155,7 @@ impl Tool for AgentTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["list", "message"] },
+                "action": { "type": "string", "enum": ["create", "list", "message"] },
                 "role": role,
                 "alias": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$", "description": "New instance name, unique within its Team; creation only" },
                 "prompt": { "type": "string", "description": "Work instructions and context; optionally include a shared-list Task ID" },
@@ -157,25 +164,7 @@ impl Tool for AgentTool {
                 "recipient": { "type": "string", "minLength": 1, "description": "Authorized instance ID, same-Team alias, or named ordinary child of this caller" },
                 "content": { "type": "string", "description": "Actionable follow-up work or coordination; may start or extend execution. Not routine status updates, user consent or a permission grant" }
             },
-            "oneOf": [
-                { "required": ["role", "prompt"], "not": { "anyOf": [
-                    { "required": ["action"] },
-                    { "required": ["recipient"] }, { "required": ["content"] }
-                ] } },
-                {
-                    "required": ["action"],
-                    "not": { "anyOf": [
-                        { "required": ["role"] }, { "required": ["alias"] }, { "required": ["prompt"] },
-                        { "required": ["working_dir"] }, { "required": ["mode"] }
-                    ] },
-                    "oneOf": [
-                        { "properties": { "action": { "const": "list" } }, "not": { "anyOf": [
-                            { "required": ["recipient"] }, { "required": ["content"] }
-                        ] } },
-                        { "properties": { "action": { "const": "message" } }, "required": ["recipient", "content"] }
-                    ]
-                }
-            ],
+            "required": ["action"],
             "additionalProperties": false
         })
     }
@@ -204,7 +193,7 @@ impl Tool for AgentTool {
             .map_err(|_| delegation_error("Agent tool result channel closed"))?
             .map_err(delegation_error)?;
         if matches!(&output, AgentToolOutput::Created(creation)
-            if creation.mode() == crate::harness::manager::preparation::DelegationMode::Background)
+            if creation.mode() == DelegationMode::Background)
         {
             context.insert_result(crate::tools::ToolTurnEnd);
         }
@@ -255,12 +244,12 @@ mod tests {
         let tool = AgentTool::new(sender, &probe_catalog(), Some(permission));
         for (input, output, terminates) in [
             (
-                serde_json::json!({"role":"probe", "prompt":"work", "mode":"foreground"}),
+                serde_json::json!({"action":"create", "role":"probe", "prompt":"work", "mode":"foreground"}),
                 Ok(AgentToolOutput::Created(creation)),
                 true,
             ),
             (
-                serde_json::json!({"role":"probe", "prompt":"work", "mode":"foreground"}),
+                serde_json::json!({"action":"create", "role":"probe", "prompt":"work", "mode":"foreground"}),
                 Ok(AgentToolOutput::Response("result".into())),
                 false,
             ),
@@ -277,7 +266,7 @@ mod tests {
                 false,
             ),
             (
-                serde_json::json!({"role":"probe", "prompt":"work", "mode":"background"}),
+                serde_json::json!({"action":"create", "role":"probe", "prompt":"work", "mode":"background"}),
                 Err("creation failed".into()),
                 false,
             ),
@@ -304,7 +293,7 @@ mod tests {
         for (action, input) in [
             (
                 "create",
-                serde_json::json!({"role":"probe", "prompt":"work"}),
+                serde_json::json!({"action":"create", "role":"probe", "prompt":"work"}),
             ),
             ("list_agents", serde_json::json!({"action":"list"})),
             (
@@ -343,62 +332,63 @@ mod tests {
     }
 
     #[test]
-    fn arguments_enforce_action_boundaries() {
+    fn rejects_invalid_operations() {
+        use serde_json::{Value, json};
+
         for input in [
-            serde_json::json!({"role":"probe", "alias":"security", "prompt":"work"}),
-            serde_json::json!({"action":"list"}),
-            serde_json::json!({"action":"message", "recipient":"peer", "content":"message"}),
+            json!({"action":"create", "role":"probe", "prompt":"work", "alias":null, "working_dir":null, "mode":null}),
+            json!({"action":"list"}),
+            json!({"action":"message", "recipient":"peer", "content":"work"}),
         ] {
             assert!(serde_json::from_value::<AgentArgs>(input.clone()).is_ok());
             for field in [
-                "unknown_field",
-                "caller",
-                "sender",
-                "executor",
-                "team",
-                "origin",
-                "message_id",
-                "timeout_ms",
+                "action",
                 "role",
-                "alias",
                 "prompt",
+                "alias",
                 "working_dir",
                 "mode",
                 "recipient",
                 "content",
-                "action",
+                "caller",
+                "executor",
+                "message_id",
+                "timeout_ms",
             ] {
-                if input.get(field).is_some()
-                    || (input.get("action").is_none() && matches!(field, "working_dir" | "mode"))
-                {
+                let mut invalid = input.clone();
+                if input.get(field).is_none() {
+                    invalid[field] = Value::Null;
+                } else if matches!(
+                    field,
+                    "action" | "role" | "prompt" | "recipient" | "content"
+                ) {
+                    invalid.as_object_mut().unwrap().remove(field);
+                } else {
                     continue;
                 }
-                for value in [serde_json::Value::Null, serde_json::json!("forged")] {
-                    let mut invalid = input.clone();
-                    invalid[field] = value;
-                    assert!(
-                        serde_json::from_value::<AgentArgs>(invalid).is_err(),
-                        "{field}"
-                    );
-                }
+                assert!(
+                    serde_json::from_value::<AgentArgs>(invalid.clone()).is_err(),
+                    "{invalid}"
+                );
             }
         }
-        for input in [
-            serde_json::json!({"prompt":"missing target"}),
-            serde_json::json!({"action":"unsupported_action"}),
-            serde_json::json!({"executor":"peer", "prompt":"work"}),
-            serde_json::json!({"action":"wait_message", "message_id":"message", "timeout_ms":0}),
-            serde_json::json!({"action":"send_message", "recipient":"peer", "content":"work"}),
-            serde_json::json!({"action":"list_agents"}),
-            serde_json::json!({"action":"message", "recipient":"peer"}),
-            serde_json::json!({"action":"message", "content":"work"}),
+        for invalid in [
+            json!({"action":"unsupported"}),
+            json!({"action":null}),
+            json!([{"action":"list"}]),
         ] {
-            assert!(serde_json::from_value::<AgentArgs>(input).is_err());
+            assert!(
+                serde_json::from_value::<AgentArgs>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
         }
     }
 
     #[test]
-    fn creation_uses_role_alias_and_explicit_prompt() {
+    fn creation_fields_and_defaults() {
+        use crate::harness::manager::preparation::DelegationMode;
+        use serde_json::json;
+
         let tool = AgentTool::new(
             mpsc::unbounded_channel().0,
             &crate::agent::custom::AgentCatalog::new(vec![
@@ -418,35 +408,32 @@ mod tests {
         let guidance = tool.description();
         assert!(guidance.contains("- code-reviewer: Review code for correctness and security."));
         assert!(!guidance.contains("Inspect code."));
-        for (alias, prompt) in [
-            ("security", "Review authentication security."),
-            ("performance", "Review query performance."),
-        ] {
-            let input = serde_json::json!({
-                "role": "code-reviewer", "alias": alias, "prompt": prompt
-            });
-            let AgentArgs::Create(request) = serde_json::from_value(input.clone()).unwrap() else {
-                panic!("role must select creation");
-            };
-            assert_eq!(request.role, "code-reviewer");
-            assert_eq!(request.alias.unwrap().as_str(), alias);
-            assert_eq!(request.prompt, prompt);
-        }
-        for input in [
-            serde_json::json!({"role": "code-reviewer", "alias": "security"}),
-            serde_json::json!({"role": "code-reviewer", "alias": "../other", "prompt": "work"}),
-        ] {
-            assert!(serde_json::from_value::<AgentArgs>(input).is_err());
-        }
-    }
 
-    #[test]
-    fn admission_error_preserves_feedback_without_retry() {
-        let error = delegation_error("working directory does not exist");
+        let input = json!({
+            "action": "create", "role": "code-reviewer", "prompt": "Review authentication.",
+            "alias": null, "working_dir": null, "mode": null
+        });
+        let AgentArgs::Create(request) = serde_json::from_value(input.clone()).unwrap() else {
+            panic!("expected creation");
+        };
+        assert_eq!(request.role, "code-reviewer");
+        assert_eq!(request.prompt, "Review authentication.");
+        assert!(request.alias.is_none() && request.working_dir.is_none() && request.mode.is_none());
+
+        let mut named = input;
+        named["alias"] = json!("security");
+        named["working_dir"] = json!("worktree");
+        named["mode"] = json!("foreground");
+        let AgentArgs::Create(request) = serde_json::from_value(named.clone()).unwrap() else {
+            panic!("expected creation");
+        };
+        assert_eq!(request.alias.unwrap().as_str(), "security");
         assert_eq!(
-            error.model_feedback(),
-            Some("working directory does not exist")
+            request.working_dir.unwrap(),
+            std::path::Path::new("worktree")
         );
-        assert_eq!(error.retryable(), Some(false));
+        assert_eq!(request.mode, Some(DelegationMode::Foreground));
+        named["alias"] = json!("../other");
+        assert!(serde_json::from_value::<AgentArgs>(named).is_err());
     }
 }

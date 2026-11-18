@@ -186,8 +186,7 @@ async fn delegation_mode_controls_tool_return_and_initial_feedback() {
                         let delta = if replied {
                             json!({"content": "parent-final"})
                         } else {
-                            let arguments =
-                                json!({"role": "probe", "prompt": "delegated-task", "mode": mode});
+                            let arguments = json!({"action": "create", "role": "probe", "prompt": "delegated-task", "mode": mode});
                             json!({"tool_calls": [{"index": 0, "id": "call_agent", "type": "function",
                             "function": {"name": "Agent", "arguments": arguments.to_string()}}]})
                         };
@@ -338,6 +337,7 @@ async fn background_launch_batch_controls_continuation() {
             let mut calls = (0..count)
                 .map(|index| {
                     let arguments = json!({
+                        "action": "create",
                         "role": if scenario == "failure" { "absent" } else { "probe" },
                         "prompt": "delegated-task",
                         "mode": "background",
@@ -888,7 +888,8 @@ async fn directed_modes_preserve_delivery_and_turn_scope() {
         (Some(Foreground), false, true),
     ] {
         let root = std::env::temp_dir().join(format!("phi-directed-mode-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
+        let worktree = root.join("prepared-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fixture = instance_for_provider(&root, listener.local_addr().unwrap(), false).await;
         let mut phi = fixture.phi.clone();
@@ -933,13 +934,20 @@ async fn directed_modes_preserve_delivery_and_turn_scope() {
             }
             if let Some(call) = response.pointer_mut("/choices/0/delta/tool_calls/0/function") {
                 let mut arguments = json!({
-                    "role": "probe", "prompt": "delegated-task",
+                    "action": "create", "role": "probe", "prompt": "delegated-task",
                 });
                 if let Some(mode) = requested {
                     arguments["mode"] = json!(mode);
                 }
                 if teammate {
                     arguments["alias"] = json!("reviewer");
+                }
+                if system_text(request).contains("set working_dir to that existing directory")
+                    && request["messages"]
+                        .to_string()
+                        .contains("in prepared-worktree")
+                {
+                    arguments["working_dir"] = json!("prepared-worktree");
                 }
                 call["arguments"] = json!(arguments.to_string());
             }
@@ -949,7 +957,11 @@ async fn directed_modes_preserve_delivery_and_turn_scope() {
             .submit_directed(
                 TurnPrompt {
                     tool_policy: Default::default(),
-                    prompt: "inspect".into(),
+                    prompt: if requested == Some(Foreground) {
+                        "inspect in prepared-worktree".into()
+                    } else {
+                        "inspect".into()
+                    },
                     source: UserPromptSubmitSource::Interactive,
                     injected_context: Vec::new(),
                     images: Vec::new(),
@@ -979,6 +991,15 @@ async fn directed_modes_preserve_delivery_and_turn_scope() {
             requested.unwrap_or(Background)
         };
         assert_eq!(status.creation.mode(), expected);
+        let expected_dir = if requested == Some(Foreground) {
+            &worktree
+        } else {
+            &root
+        };
+        assert_eq!(
+            status.creation.working_dir(),
+            expected_dir.canonicalize().unwrap()
+        );
         assert_eq!(
             status.outcome.as_ref().unwrap().as_ref().unwrap(),
             "child-result"
@@ -1046,9 +1067,17 @@ async fn directed_modes_preserve_delivery_and_turn_scope() {
             usize::from(expected == Background)
         );
         let first = received.recv().await.unwrap();
-        assert!(system_text(&first).contains(
-            &json!({"role": "probe", "mode": requested.unwrap_or(Background)}).to_string()
-        ));
+        let system = system_text(&first);
+        let (_, binding) = system.split_once("with these fixed arguments: ").unwrap();
+        let binding = serde_json::Deserializer::from_str(binding)
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding["action"], "create");
+        assert_eq!(binding["role"], status.creation.definition());
+        assert_eq!(binding["mode"], json!(requested.unwrap_or(Background)));
+        assert_eq!(status.creation.prompt(), "delegated-task");
         let requests = std::iter::from_fn(|| received.try_recv().ok()).collect::<Vec<_>>();
         if expected == Foreground {
             let summary = requests
@@ -1110,7 +1139,11 @@ fn failed_directed_completion(request: &Value) -> Value {
     } else {
         "probe"
     };
-    let arguments = json!({"role": agent, "prompt": "inspect", "working_dir": working_dir});
+    let arguments = if text.contains("mixed-arguments") {
+        json!({"action": "create", "role": "probe", "prompt": "inspect", "recipient": "peer"})
+    } else {
+        json!({"action": "create", "role": agent, "prompt": "inspect", "working_dir": working_dir})
+    };
     let mut calls = vec![json!({"index": 0, "id": "failed_agent", "type": "function",
         "function": {"name": "Agent", "arguments": arguments.to_string()}})];
     if text.contains("mixed-tools") {
@@ -1128,6 +1161,7 @@ fn failed_directed_completion(request: &Value) -> Value {
 async fn directed_failure_ends_turn_without_retry_and_preserves_error() {
     for (prompt, expected) in [
         ("@probe malformed-directory", "invalid type"),
+        ("@probe mixed-arguments", "unknown field `recipient`"),
         ("@probe missing-directory", "working directory"),
         ("@probe wrong-agent", "does not match"),
         ("@probe mixed-tools", "no other tools were executed"),
@@ -1185,6 +1219,7 @@ async fn directed_failure_ends_turn_without_retry_and_preserves_error() {
             received.try_recv().is_err(),
             "failed delegation requested another completion"
         );
+        assert!(instance.subagent_snapshots().await.unwrap().is_empty());
         let transcript = serde_json::to_string(&instance.transcript().await.unwrap()).unwrap();
         assert!(transcript.contains(expected));
         assert!(!transcript.contains("the tool failed"));
@@ -1219,7 +1254,7 @@ fn nested_completion(request: &Value) -> Value {
     let (delta, reason) = if parent && !replied {
         (
             json!({"tool_calls": [{"index": 0, "id": "nested_call", "type": "function",
-            "function": {"name": "Agent", "arguments": json!({"role": "leaf", "prompt": "leaf-task"}).to_string()}}]}),
+            "function": {"name": "Agent", "arguments": json!({"action": "create", "role": "leaf", "prompt": "leaf-task"}).to_string()}}]}),
             "tool_calls",
         )
     } else {

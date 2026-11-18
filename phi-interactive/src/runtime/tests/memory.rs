@@ -405,6 +405,7 @@ async fn directed_memory_keeps_scope_without_retrying_automatic_injection() {
                 alias: None,
                 parent_tool_call_id: None,
                 workflow_run_id: None,
+                mode: phi_sdk::agent_manager::DelegationMode::Background,
                 recovered_outcome: None,
             })
             .await

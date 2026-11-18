@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::tools::{AgentArgs, AgentManagementArgs};
 use crate::core::event::{PhiFailure, PhiFailureKind};
 use crate::core::interaction::{InteractionResponse, PermissionDecision};
 use crate::factory::{Phi, PhiRuntimeServices};
@@ -1379,16 +1380,31 @@ async fn directed_agent_tool_rejects_mismatch_and_duplicate_without_spawning() {
         attempted: false,
         instance_id: None,
     });
-    for input in [
-        serde_json::json!({"role": "other", "prompt": "inspect"}),
-        serde_json::json!({"action": "message", "recipient": "retained", "content": "inspect"}),
-        serde_json::json!({"action": "list"}),
-        serde_json::json!({"role": "reviewer", "prompt": "inspect"}),
-        serde_json::json!({"role": "reviewer", "prompt": "inspect"}),
+    for (args, attempted) in [
+        (
+            AgentArgs::Create(AgentSpawnRequest::new("other", "inspect")),
+            false,
+        ),
+        (
+            AgentArgs::Manage(AgentManagementArgs::SendMessage {
+                recipient: AgentInstanceId::new("retained"),
+                content: "inspect".into(),
+            }),
+            false,
+        ),
+        (AgentArgs::Manage(AgentManagementArgs::ListAgents {}), false),
+        (
+            AgentArgs::Create(AgentSpawnRequest::new("reviewer", "inspect")),
+            true,
+        ),
+        (
+            AgentArgs::Create(AgentSpawnRequest::new("reviewer", "inspect")),
+            true,
+        ),
     ] {
         let (reply, result) = tokio::sync::oneshot::channel();
         state.start_agent_tool_request(AgentToolRequest {
-            args: serde_json::from_value(input.clone()).unwrap(),
+            args,
             scope: CoreEventScope {
                 session_id: Some(state.transcript.id.clone()),
                 turn_id: Some("turn-1".into()),
@@ -1398,9 +1414,10 @@ async fn directed_agent_tool_rejects_mismatch_and_duplicate_without_spawning() {
             reply,
         });
         assert!(result.await.unwrap().is_err());
-        if input["role"] != "reviewer" {
-            assert!(!state.directed_delegation.as_ref().unwrap().attempted);
-        }
+        assert_eq!(
+            state.directed_delegation.as_ref().unwrap().attempted,
+            attempted
+        );
     }
     assert!(state.child_observations.is_empty());
     assert!(state.directed_delegation.as_ref().unwrap().attempted);
@@ -1450,21 +1467,24 @@ async fn agent_tool_rejects_forged_stale_and_missing_tool_scope() {
             "tool" => forged.parent_tool_call_id = None,
             _ => unreachable!(),
         }
-        for input in [
-            serde_json::json!({"role": "reviewer", "prompt": "task"}),
-            serde_json::json!({"action": "message", "recipient": "retained", "content": "task"}),
-            serde_json::json!({"action": "list"}),
+        for args in [
+            AgentArgs::Create(AgentSpawnRequest::new("reviewer", "task")),
+            AgentArgs::Manage(AgentManagementArgs::SendMessage {
+                recipient: AgentInstanceId::new("retained"),
+                content: "task".into(),
+            }),
+            AgentArgs::Manage(AgentManagementArgs::ListAgents {}),
         ] {
             let (reply, result) = tokio::sync::oneshot::channel();
             state.start_agent_tool_request(AgentToolRequest {
-                args: serde_json::from_value(input.clone()).unwrap(),
+                args,
                 scope: forged.clone(),
                 reply,
             });
             let error = result.await.unwrap().unwrap_err();
             assert!(
                 error.contains("execution scope") || error.contains("tool-call identity"),
-                "{field}: {input}: {error}"
+                "{field}: {error}"
             );
         }
     }

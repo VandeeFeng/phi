@@ -1006,6 +1006,7 @@ async fn runtime_replacement_preserves_new_child_links() {
         let child: crate::session::ChildSessionLink = serde_json::from_value(serde_json::json!({
             "child_agent_id": "admitted-child", "child_session_id": "admitted-child",
             "child_working_dir": root, "parent_tool_call_id": "admitted-call",
+            "mode": "background",
         }))
         .unwrap();
         agent.record_child_intent(child.clone()).await.unwrap();

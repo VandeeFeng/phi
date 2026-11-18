@@ -8,6 +8,7 @@ use phi_tui::{
 
 use super::super::state::{PickerKind, PickerState, UiState};
 use super::mentions::{complete_mention, file_mention_context};
+use super::picker::model;
 use super::picker::session::{ResumePickerAction, handle_resume_picker_input};
 use crate::commands::{SlashCommand, SlashCommandSource};
 use crate::interactive::completion::{fuzzy_match, matching_arguments, matching_commands};
@@ -63,6 +64,9 @@ fn argument_hint<'a>(input: &'a str, commands: &'a [SlashCommand]) -> Option<Arg
         return None;
     }
     let (name, arguments) = crate::commands::slash_command_parts(input)?;
+    if name == "model" {
+        return None;
+    }
     let command = commands.iter().find(|command| command.name == name)?;
     let specification = command.arguments.as_ref()?;
     let query = arguments.trim_start();
@@ -288,9 +292,6 @@ pub(crate) enum UiAction {
         switch_name: String,
         alias: String,
     },
-    // Nested switch pickers stage edits; only a terminal menu exit emits this save.
-    SaveSwitchConfig,
-    ApplySwitchConfig(String),
     ToggleAllBlocksExpanded,
     ToggleTasks,
     BackgroundRunningBash,
@@ -497,8 +498,8 @@ fn route_slash_menu(
         return Ok(InputOutcome::Ignored);
     }
     match key {
-        KeyInput::Up => state.slash_menu.move_up(slash_matches(state).len()),
-        KeyInput::Down => state.slash_menu.move_down(slash_matches(state).len()),
+        KeyInput::Up => state.slash_menu.move_up(completion_count(state)),
+        KeyInput::Down => state.slash_menu.move_down(completion_count(state)),
         KeyInput::Tab => apply_slash_command(state),
         KeyInput::Enter | KeyInput::AltEnter => {
             let dispatch = dispatch_for_key(state, &key);
@@ -869,7 +870,6 @@ fn cancel_picker(state: &mut UiState) -> UiAction {
             UiAction::Pick(format!("switch:back:configure:{switch_name}"))
         }
         PickerKind::SwitchConfigure => UiAction::Pick(String::from("switch:back")),
-        PickerKind::SwitchSelect => UiAction::Pick(String::from("switch:sync")),
         _ => UiAction::None,
     };
     state.close_picker();
@@ -877,16 +877,10 @@ fn cancel_picker(state: &mut UiState) -> UiAction {
 }
 
 fn exit_switch_menu(state: &mut UiState) -> UiAction {
-    let action = match state.picker.as_ref().map(|picker| &picker.kind) {
-        Some(PickerKind::SwitchEdit { switch_name } | PickerKind::SwitchModel { switch_name }) => {
-            UiAction::ApplySwitchConfig(switch_name.clone())
-        }
-        _ => UiAction::SaveSwitchConfig,
-    };
     state.editor.clear();
     state.naming_switch = false;
     state.close_picker();
-    action
+    UiAction::None
 }
 
 fn pick_value(state: &mut UiState, value: String) -> UiAction {
@@ -923,6 +917,14 @@ fn input_hint(state: &UiState) -> Option<ArgumentHint<'_>> {
     if state.editor.cursor() != input.len() || state.argument_hint.is_dismissed(input) {
         return None;
     }
+    if let Some(usage) = model::completion_usage(state) {
+        return Some(ArgumentHint {
+            start: input.len(),
+            query: "",
+            usage,
+            values: Vec::new(),
+        });
+    }
     if state.file_mentions.has_mode_hint(input) {
         Some(ArgumentHint {
             start: input.len(),
@@ -935,11 +937,32 @@ fn input_hint(state: &UiState) -> Option<ArgumentHint<'_>> {
     }
 }
 
+fn completion_count(state: &UiState) -> usize {
+    if model::completion_query(state).is_some() {
+        model::completion_items(state).len()
+    } else {
+        slash_matches(state).len()
+    }
+}
+
 fn slash_menu_open(state: &UiState) -> bool {
-    state.slash_menu.open && !slash_matches(state).is_empty()
+    state.slash_menu.open && completion_count(state) > 0
 }
 
 fn apply_slash_command(state: &mut UiState) {
+    if let Some(query) = model::completion_query(state) {
+        let matches = model::completion_items(state);
+        let Some(item) = matches.get(state.slash_menu.selected) else {
+            return;
+        };
+        let replacement = item.value.clone();
+        let end = state.editor.text().len();
+        let start = end - query.len();
+        state.editor.replace_range(start..end, &replacement);
+        state.slash_menu.selected = 0;
+        state.slash_menu.close();
+        return;
+    }
     let Some(range) = slash_range(state.editor.text()) else {
         return;
     };
@@ -956,12 +979,14 @@ fn apply_slash_command(state: &mut UiState) {
 }
 
 fn clamp_slash_selection(state: &mut UiState) {
-    let len = slash_matches(state).len();
+    let len = completion_count(state);
     state.slash_menu.clamp(len);
 }
 
 pub(crate) fn slash_matches(state: &UiState) -> Vec<&SlashCommand> {
-    if !state.slash_menu.open || argument_hint(state.editor.text(), &state.slash_commands).is_some()
+    if !state.slash_menu.open
+        || model::completion_query(state).is_some()
+        || argument_hint(state.editor.text(), &state.slash_commands).is_some()
     {
         return Vec::new();
     }
@@ -1176,21 +1201,27 @@ pub(in crate::interactive) fn render_menu(
 }
 
 fn render_slash_menu(state: &UiState, context: &RenderContext<'_>) -> Vec<StyledLine> {
-    let matches = slash_matches(state);
-    if matches.is_empty() {
+    if !state.slash_menu.open {
         return Vec::new();
     }
-    let items = matches
-        .iter()
-        .map(|command| {
-            let description = match command.source {
-                SlashCommandSource::Builtin => command.description.clone(),
-                SlashCommandSource::User => format!("[u] {}", command.description),
-                SlashCommandSource::Extension => format!("[e] {}", command.description),
-            };
-            SelectItem::new(&command.name, description)
-        })
-        .collect();
+    let items: Vec<_> = if model::completion_query(state).is_some() {
+        model::completion_items(state)
+    } else {
+        slash_matches(state)
+            .iter()
+            .map(|command| {
+                let description = match command.source {
+                    SlashCommandSource::Builtin => command.description.clone(),
+                    SlashCommandSource::User => format!("[u] {}", command.description),
+                    SlashCommandSource::Extension => format!("[e] {}", command.description),
+                };
+                SelectItem::new(&command.name, description)
+            })
+            .collect()
+    };
+    if items.is_empty() {
+        return Vec::new();
+    }
     SelectMenu {
         title: None,
         items,
@@ -1203,7 +1234,7 @@ fn render_slash_menu(state: &UiState, context: &RenderContext<'_>) -> Vec<Styled
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{CommandArguments, CommandRegistry};
+    use crate::commands::{CommandArgument, CommandArguments, CommandRegistry};
     use crate::interactive::components::permission::{ConfirmState, InteractionPrompt};
 
     #[test]
@@ -1328,7 +1359,6 @@ mod tests {
                 "/login openai ",
                 "/login o [openai | openai-codex]",
             ),
-            ("/model DATE", "/model update ", "/model DATE [update]"),
         ] {
             for key in [KeyInput::Tab, KeyInput::Enter] {
                 let mut state = UiState::default();
@@ -1402,6 +1432,89 @@ mod tests {
             route_editor(&mut state, KeyInput::Enter, &agents).unwrap(),
             InputOutcome::Action(UiAction::Submit { display, .. }) if display == "/model"
         ));
+    }
+
+    #[test]
+    fn model_completion_reuses_slash_menu_and_submits_selection() {
+        let agents = AgentCatalog::default();
+        for query in ["son", "SON", "snt", "first/son", "first/sonnet/v2"] {
+            let mut state = UiState::default();
+            state.slash_commands =
+                CommandRegistry::new(&[]).declarations(Vec::new(), &Default::default());
+            state.model_arguments = vec![
+                CommandArgument {
+                    value: "first/sonnet/v2".into(),
+                    alias: Some("sonnet/v2".into()),
+                },
+                CommandArgument {
+                    value: "second/sonnet/v2".into(),
+                    alias: Some("sonnet/v2".into()),
+                },
+            ];
+            state.editor.set_text(format!("/model {query}"));
+            update_completion_menus(&mut state, &agents);
+            if query != "first/sonnet/v2" {
+                assert!(slash_menu_open(&state), "{query}");
+                let (lines, _) = render_menu(&state, 80, &Theme::default());
+                assert!(lines.iter().any(|line| line.text.contains("sonnet/v2")));
+                assert!(lines.iter().any(|line| line.text.contains("first")));
+                route_slash_menu(&mut state, KeyInput::Tab, &agents).unwrap();
+                assert_eq!(state.editor.text(), "/model first/sonnet/v2");
+            }
+            assert!(!slash_menu_open(&state));
+            assert!(matches!(
+                route_editor(&mut state, KeyInput::Enter, &agents).unwrap(),
+                InputOutcome::Action(UiAction::Submit { display, .. })
+                    if display == "/model first/sonnet/v2"
+            ));
+
+            state.editor.set_text("/model son");
+            update_completion_menus(&mut state, &agents);
+            route_slash_menu(&mut state, KeyInput::Down, &agents).unwrap();
+            assert!(matches!(
+                route_slash_menu(&mut state, KeyInput::Enter, &agents).unwrap(),
+                InputOutcome::Action(UiAction::Submit { display, .. })
+                    if display == "/model second/sonnet/v2"
+            ));
+
+            state.editor.set_text("/model son");
+            update_completion_menus(&mut state, &agents);
+            route_slash_menu(&mut state, KeyInput::Esc, &agents).unwrap();
+            assert!(!slash_menu_open(&state));
+            assert_eq!(state.editor.text(), "/model son");
+        }
+    }
+
+    #[test]
+    fn model_command_tab_and_update_completion_are_preserved() {
+        let agents = AgentCatalog::default();
+        for input in ["/mod", "/model"] {
+            let mut state = UiState::default();
+            state.slash_commands =
+                CommandRegistry::new(&[]).declarations(Vec::new(), &Default::default());
+            state.editor.set_text(input);
+            update_completion_menus(&mut state, &agents);
+            route_slash_menu(&mut state, KeyInput::Tab, &agents).unwrap();
+            assert_eq!(state.editor.text(), "/model ");
+            assert!(!slash_menu_open(&state));
+            assert!(render_menu(&state, 80, &Theme::default()).0.is_empty());
+            let (lines, _) = render_editor(&mut state, "", 80, &Theme::default());
+            assert!(lines.iter().flat_map(|line| &line.segments).any(|segment| {
+                *segment
+                    == phi_tui::StyledSegment::new("[<provider/model> | update]", ThemeColor::Dim)
+            }));
+            assert_eq!(state.editor.text(), "/model ");
+            assert!(matches!(
+                route_editor(&mut state, KeyInput::Enter, &agents).unwrap(),
+                InputOutcome::Action(UiAction::Submit { display, .. }) if display == "/model"
+            ));
+            state.editor.set_text("/model DATE");
+            update_completion_menus(&mut state, &agents);
+            assert!(input_hint(&state).is_none());
+            route_slash_menu(&mut state, KeyInput::Tab, &agents).unwrap();
+            assert_eq!(state.editor.text(), "/model update");
+            assert!(!slash_menu_open(&state));
+        }
     }
 
     #[test]
@@ -1925,15 +2038,12 @@ mod tests {
             crate::interactive::state::MenuKind::Switch,
             PickerState::with_kind(PickerKind::SwitchSelect, "switches", Vec::new()),
         );
-        assert_eq!(
-            handle_picker_key(&mut state, KeyInput::Esc),
-            UiAction::Pick(String::from("switch:sync"))
-        );
+        assert_eq!(handle_picker_key(&mut state, KeyInput::Esc), UiAction::None);
 
         open_configure(&mut state);
         assert_eq!(
             handle_picker_key(&mut state, KeyInput::Ctrl('c')),
-            UiAction::SaveSwitchConfig
+            UiAction::None
         );
         for (kind, escape) in [
             (
@@ -1958,7 +2068,7 @@ mod tests {
                 let expected = if key == KeyInput::Esc {
                     UiAction::Pick(escape.into())
                 } else {
-                    UiAction::ApplySwitchConfig("custom".into())
+                    UiAction::None
                 };
                 assert_eq!(handle_picker_key(&mut state, key.clone()), expected);
                 assert!(state.picker.is_none());

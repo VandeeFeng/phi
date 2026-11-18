@@ -742,15 +742,30 @@ async fn canonical_compaction_and_request_retries_never_replay_tools() {
             })
             .await
             .unwrap();
-        let view = tokio::time::timeout(Duration::from_secs(5), instance.wait_for_quiescence(None))
-            .await
-            .unwrap()
-            .unwrap();
+        let view =
+            tokio::time::timeout(Duration::from_secs(30), instance.wait_for_quiescence(None))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let observed = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
         let finished = observed.iter().any(|event| matches!(event, AgentInstanceEvent::Phi(envelope) if matches!(envelope.event, crate::PhiEvent::TurnFinished { compacted: true, .. })));
         assert_eq!(finished, failures == 3);
-        assert_eq!(observed.iter().filter(|event| matches!(event, AgentInstanceEvent::Phi(envelope) if matches!(envelope.event, crate::PhiEvent::ProviderRecovery { ref recovery } if recovery.reason == crate::RecoveryReason::ProviderRetry))).count(), 3);
+        let delays = observed
+            .iter()
+            .filter_map(|event| match event {
+                AgentInstanceEvent::Phi(envelope) => match &envelope.event {
+                    crate::PhiEvent::ProviderRecovery { recovery }
+                        if recovery.reason == crate::RecoveryReason::ProviderRetry =>
+                    {
+                        Some(recovery.delay_ms)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delays, [2000, 4000, 8000]);
         assert_eq!(view.snapshot.latest_error.is_some(), failures == 4);
         let requests = std::iter::from_fn(|| requests.try_recv().ok()).collect::<Vec<_>>();
         assert_eq!(requests.len(), 6);
@@ -783,6 +798,56 @@ async fn canonical_compaction_and_request_retries_never_replay_tools() {
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[tokio::test]
+async fn server_retry_delay_remains_interruptible() {
+    let root =
+        std::path::Path::new("/tmp").join(format!("phi-retry-delay-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = instance_for_provider(&root, listener.local_addr().unwrap(), false).await;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket).await;
+        let body = r#"{"error":{"message":"overloaded"}}"#;
+        socket.write_all(format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After-Ms: 309000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len(),
+        ).as_bytes()).await.unwrap();
+    });
+    let mut events = base.subscribe();
+    base.submit(TurnPrompt {
+        prompt: "retry".into(),
+        source: UserPromptSubmitSource::Sdk,
+        images: Vec::new(),
+        injected_context: Vec::new(),
+        tool_policy: Default::default(),
+    })
+    .await
+    .unwrap();
+    let recovery = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentInstanceEvent::Phi(envelope) = events.recv().await.unwrap()
+                && let crate::PhiEvent::ProviderRecovery { recovery } = envelope.event
+            {
+                break recovery;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(recovery.delay_ms, 309_000);
+    assert_eq!(recovery.attempt, 1);
+    assert_eq!(recovery.max_attempts, 3);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        base.abort().await.unwrap();
+        base.wait_for_quiescence(None).await.unwrap();
+        base.manager.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

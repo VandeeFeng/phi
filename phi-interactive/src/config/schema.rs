@@ -8,7 +8,7 @@ use phi_sdk::extension::BuiltinExtension;
 use phi_sdk::extension::mcp::config::{McpServerConfig, McpSettings};
 use phi_sdk::extension::memory::MemoryConfig;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SwitchConfig {
     pub name: String,

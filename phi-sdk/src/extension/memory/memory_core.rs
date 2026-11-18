@@ -11,7 +11,7 @@ use super::utils::{DEFAULT_TAPE_EXCLUDE_DIRS, escape_xml};
 use crate::context::InjectedContext;
 use crate::transcript::Transcript;
 pub use crate::utils::path::expand_home_path;
-use crate::utils::workspace::get_project_meta;
+use crate::utils::workspace::WorkspaceMeta;
 
 pub const DEFAULT_MEMORY_SCAN: (u64, u64) = (72, 168);
 pub const DEFAULT_GLOBAL_MEMORY_DIRNAME: &str = "global";
@@ -166,8 +166,8 @@ pub fn get_memory_repo_dir(settings: &MemorySettings) -> PathBuf {
         .unwrap_or_else(default_local_path)
 }
 
-pub fn get_memory_dir(settings: &MemorySettings, working_dir: &Path) -> PathBuf {
-    get_memory_repo_dir(settings).join(get_project_meta(working_dir).name)
+pub fn get_memory_dir(settings: &MemorySettings, working_dir: &Path) -> anyhow::Result<PathBuf> {
+    Ok(get_memory_repo_dir(settings).join(WorkspaceMeta::discover(working_dir, None)?.name()))
 }
 
 pub fn get_global_memory_dir(settings: &MemorySettings) -> Option<PathBuf> {
@@ -196,7 +196,7 @@ pub fn tape_gate_enabled(settings: &MemorySettings, working_dir: &Path) -> bool 
         working_dir.to_string_lossy().as_ref(),
         settings.tape.as_ref(),
     )
-    .enabled
+    .is_ok_and(|gate| gate.enabled)
 }
 
 pub fn is_memory_initialized(memory_dir: &Path) -> bool {
@@ -361,7 +361,7 @@ pub fn build_memory_context(
     settings: &MemorySettings,
     working_dir: &Path,
 ) -> anyhow::Result<String> {
-    let project_memory_dir = get_memory_dir(settings, working_dir);
+    let project_memory_dir = get_memory_dir(settings, working_dir)?;
     let global_memory_dir = get_global_memory_dir(settings);
     let mut lines = memory_context(&[], MemoryContextMode::Normal);
 
@@ -386,7 +386,6 @@ pub fn build_tape_injection_with_prompt(
     prompt: Option<&str>,
     precompute: Option<&SmartTapePrecompute>,
 ) -> anyhow::Result<Option<MemoryInjection>> {
-    let project_memory_dir = get_memory_dir(settings, working_dir);
     let tape_context = settings
         .tape
         .as_ref()
@@ -395,23 +394,17 @@ pub fn build_tape_injection_with_prompt(
     let strategy = tape_context.strategy.unwrap_or_default();
     let limit = tape_context.file_limit.unwrap_or(10);
     let memory_scan = normalize_memory_scan_range(tape_context.memory_scan);
-    let gate = resolve_tape_gate(
-        working_dir.to_string_lossy().as_ref(),
-        settings.tape.as_ref(),
-    );
-    let project = gate
-        .project
-        .unwrap_or_else(|| get_project_meta(working_dir));
+    let workspace = WorkspaceMeta::discover(working_dir, None)?;
+    let project_memory_dir = get_memory_repo_dir(settings).join(workspace.name());
     let service = TapeService::create(
         &project_memory_dir,
-        &project.name,
+        workspace.name(),
         transcript.id.clone(),
         working_dir.to_string_lossy().to_string(),
     )?;
-    let mut selector = super::tape::context::MemoryFileSelector::new_for_project(
+    let mut selector = super::tape::context::MemoryFileSelector::new(
         &project_memory_dir,
-        project.root.as_str(),
-        &project.name,
+        &workspace,
         tape_context.whitelist,
         tape_context.blacklist,
     );
@@ -467,7 +460,6 @@ pub fn precompute_tape_context(
     working_dir: &Path,
     transcript: &Transcript,
 ) -> anyhow::Result<Option<SmartTapePrecompute>> {
-    let project_memory_dir = get_memory_dir(settings, working_dir);
     let tape_context = settings
         .tape
         .as_ref()
@@ -479,23 +471,23 @@ pub fn precompute_tape_context(
     let gate = resolve_tape_gate(
         working_dir.to_string_lossy().as_ref(),
         settings.tape.as_ref(),
-    );
+    )?;
     if !gate.enabled {
         return Ok(None);
     }
-    let project = gate
-        .project
-        .unwrap_or_else(|| get_project_meta(working_dir));
+    let workspace = gate
+        .workspace
+        .ok_or_else(|| anyhow::anyhow!("enabled Tape gate has no workspace"))?;
+    let project_memory_dir = get_memory_repo_dir(settings).join(workspace.name());
     let service = TapeService::create(
         &project_memory_dir,
-        &project.name,
+        workspace.name(),
         transcript.id.clone(),
         working_dir.to_string_lossy().to_string(),
     )?;
-    let mut selector = super::tape::context::MemoryFileSelector::new_for_project(
+    let mut selector = super::tape::context::MemoryFileSelector::new(
         &project_memory_dir,
-        project.root.as_str(),
-        &project.name,
+        &workspace,
         tape_context.whitelist,
         tape_context.blacklist,
     );

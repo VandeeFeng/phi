@@ -80,18 +80,37 @@ impl MemoryService {
         anyhow::ensure!(config.enabled, "memory is disabled");
         let working_dir = working_dir.into();
         let settings = memory_core::settings_from_config(config);
-        let project = crate::utils::workspace::get_project_meta(&working_dir);
-        let memory_project_dir = memory_core::get_memory_dir(&settings, &working_dir);
-        let mut service = Self::new(&memory_project_dir, &project.name)?;
+        let workspace = crate::utils::workspace::WorkspaceMeta::discover(&working_dir, None)?;
+        let memory_project_dir = memory_core::get_memory_repo_dir(&settings).join(workspace.name());
+        let mut service = Self::new(&memory_project_dir, workspace.name())?;
         if config.tape_enabled() && memory_core::tape_gate_enabled(&settings, &working_dir) {
             service.tape = Some(Arc::new(TapeService::create(
                 &memory_project_dir,
-                &project.name,
+                workspace.name(),
                 session_id,
                 working_dir.display().to_string(),
             )?));
         }
         Ok(service)
+    }
+
+    pub fn repository_is_dirty(settings: &super::types::MemorySettings) -> anyhow::Result<bool> {
+        use super::memory_git::{LocalMemoryGit, MemoryGit};
+
+        let directory = memory_core::get_memory_repo_dir(settings);
+        let workspace = crate::utils::workspace::WorkspaceMeta::discover(&directory, None)?;
+        anyhow::ensure!(
+            workspace.git_dir().is_some()
+                && directory.canonicalize()? == workspace.root.canonicalize()?,
+            "memory directory is not a repository root"
+        );
+        let status = LocalMemoryGit::new(&directory, None).status()?;
+        anyhow::ensure!(
+            status.success,
+            "memory repository status failed: {}",
+            status.stdout
+        );
+        Ok(!status.stdout.is_empty())
     }
 
     pub fn tape(&self) -> Option<&Arc<TapeService>> {
@@ -279,49 +298,144 @@ mod tests {
     }
 
     #[test]
-    fn initialization_and_empty_reads_do_not_create_memory_directories() {
-        for tape_enabled in [false, true] {
-            let directory = temp_dir();
-            let memory_root = directory.join("memory");
-            let config = isolated_config(&memory_root, tape_enabled);
-            let service = MemoryService::create(&config, "session", &directory).unwrap();
-            assert_eq!(service.tape().is_some(), tape_enabled);
-            assert!(!memory_root.exists());
-            assert!(service.reconcile().unwrap().nodes.is_empty());
-            assert!(service.refresh().unwrap().nodes.is_empty());
-            if let Some(tape) = service.tape() {
-                assert!(
-                    tape.get_anchor_store()
-                        .get_all_anchors()
-                        .unwrap()
-                        .is_empty()
-                );
-            }
-            assert!(!directory.exists());
-        }
+    fn repository_status_requires_its_own_root_and_tracks_changes() {
+        let directory =
+            PathBuf::from("/tmp").join(format!("phi-memory-status-{}", uuid::Uuid::new_v4()));
+        let mut settings = memory_core::settings_from_config(&isolated_config(&directory, false));
+        assert!(MemoryService::repository_is_dirty(&settings).is_err());
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(MemoryService::repository_is_dirty(&settings).is_err());
+        let output = crate::utils::workspace::git_command(&directory, &["init", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!MemoryService::repository_is_dirty(&settings).unwrap());
+        std::fs::write(directory.join("memory.md"), "memory\n").unwrap();
+        assert!(MemoryService::repository_is_dirty(&settings).unwrap());
+        std::fs::remove_file(directory.join("memory.md")).unwrap();
+        assert!(!MemoryService::repository_is_dirty(&settings).unwrap());
+        let nested = directory.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        settings.memory_dir.as_mut().unwrap().local_path = Some(nested.display().to_string());
+        assert!(MemoryService::repository_is_dirty(&settings).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn first_tape_write_creates_memory_directory() {
+    fn workspace_scopes_lazy_memory_and_tape_persistence() {
         let directory = temp_dir();
-        let config = isolated_config(&directory.join("memory"), true);
-        let service = MemoryService::create(&config, "session", &directory).unwrap();
-        service
-            .tape()
-            .unwrap()
-            .create_anchor_without_transcript("design", TapeAnchorType::Normal, None)
-            .unwrap();
-        assert!(service.memory_project_dir().exists());
-        assert_eq!(
-            service
-                .tape()
-                .unwrap()
-                .get_anchor_store()
-                .get_all_anchors()
-                .unwrap()
-                .len(),
-            1
-        );
+        let plain = directory.join("plain");
+        let main = directory.join("main");
+        let linked = directory.join("linked");
+        for root in [&plain, &main] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+        }
+        for arguments in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            vec![
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        ] {
+            let output = crate::utils::workspace::git_command(&main, &arguments)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::create_dir_all(linked.join("src")).unwrap();
+        for (root, project_name, only_git, workspace_id) in [
+            (
+                &plain,
+                "src",
+                false,
+                Some(format!("directory:{}", plain.join("src").display())),
+            ),
+            (&plain, "src", true, None),
+            (&main, "main", true, Some("git:main".to_owned())),
+            (
+                &linked,
+                "linked",
+                true,
+                Some("git:worktrees/linked".to_owned()),
+            ),
+        ] {
+            for tape_enabled in [false, true] {
+                let memory_root = directory.join("memory");
+                let mut config = isolated_config(&memory_root, tape_enabled);
+                config.tape.as_mut().unwrap().only_git = Some(only_git);
+                let working_dir = root.join("src");
+                let project_memory = memory_root.join(project_name);
+                let service = MemoryService::create(&config, "session", &working_dir).unwrap();
+                assert_eq!(service.memory_project_dir(), project_memory);
+                assert_eq!(
+                    memory_core::get_memory_dir(
+                        &memory_core::settings_from_config(&config),
+                        &working_dir
+                    )
+                    .unwrap(),
+                    project_memory
+                );
+                assert!(service.reconcile().unwrap().nodes.is_empty());
+                assert!(service.refresh().unwrap().nodes.is_empty());
+                assert!(!memory_root.exists());
+                assert_eq!(
+                    service.tape().is_some(),
+                    tape_enabled && workspace_id.is_some()
+                );
+                if let Some(tape) = service.tape() {
+                    let anchor = tape
+                        .create_anchor_without_transcript("design", TapeAnchorType::Normal, None)
+                        .unwrap();
+                    assert_eq!(
+                        anchor.meta.as_ref().unwrap().workspace.as_deref(),
+                        workspace_id.as_deref()
+                    );
+                    assert_eq!(anchor.session_id, "session");
+                    assert_eq!(anchor.meta.as_ref().unwrap().git.is_some(), root != &plain);
+                    assert!(project_memory.is_dir());
+                    let reopened = MemoryService::create(&config, "session", &working_dir).unwrap();
+                    let persisted = reopened
+                        .tape()
+                        .unwrap()
+                        .get_anchor_store()
+                        .get_all_anchors()
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(persisted).unwrap(),
+                        serde_json::to_value([anchor]).unwrap()
+                    );
+                    std::fs::remove_dir_all(&memory_root).unwrap();
+                }
+            }
+        }
+        let memory_root = directory.join("memory");
+        let config = isolated_config(&memory_root, true);
+        std::fs::write(plain.join("src/.git"), "gitdir: missing\n").unwrap();
+        for working_dir in [plain.join("src"), directory.join("missing")] {
+            assert!(MemoryService::create(&config, "session", &working_dir).is_err());
+        }
+        assert!(!memory_root.exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

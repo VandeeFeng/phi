@@ -667,20 +667,48 @@ impl RuntimePreparation {
         })
     }
 
+    pub(crate) async fn apply_switch_config(
+        &self,
+        access: &SessionAccess,
+        switches: Option<Vec<crate::config::SwitchConfig>>,
+    ) -> anyhow::Result<RuntimeView> {
+        let agent = access.binding()?;
+        let mut seed = agent.configuration_seed().await?;
+        if seed.source_settings.switches == switches {
+            return Ok(agent.current_runtime_view().await);
+        }
+        let mut settings = (*seed.source_settings).clone();
+        settings.switches = switches;
+        let selection = (EffectiveSwitch::for_session_switch(&seed.session, &settings)
+            != EffectiveSwitch::for_session_switch(&seed.session, &seed.source_settings))
+        .then(|| RuntimeSelection::Switch {
+            name: seed.session.current_switch.to_string(),
+        });
+        seed.source_settings = Arc::new(settings);
+        self.apply_selection(agent, seed, selection).await
+    }
+
     pub(crate) async fn configure_runtime(
         &self,
         access: &SessionAccess,
-        mut selection: RuntimeSelection,
+        selection: RuntimeSelection,
     ) -> anyhow::Result<RuntimeView> {
         let agent = access.binding()?;
         let seed = agent.configuration_seed().await?;
+        self.apply_selection(agent, seed, Some(selection)).await
+    }
+
+    async fn apply_selection(
+        &self,
+        agent: Arc<AgentSession>,
+        seed: crate::runtime::session::RuntimeConfigurationSeed,
+        mut selection: Option<RuntimeSelection>,
+    ) -> anyhow::Result<RuntimeView> {
         let catalog = match &selection {
-            RuntimeSelection::Model { .. } => self.configuration()?.snapshot().model_catalog,
-            RuntimeSelection::Switch { .. } | RuntimeSelection::ThinkingLevel { .. } => {
-                seed.runtime.model_catalog()
-            }
+            Some(RuntimeSelection::Model { .. }) => self.configuration()?.snapshot().model_catalog,
+            _ => seed.runtime.model_catalog(),
         };
-        if let RuntimeSelection::ThinkingLevel { level } = &mut selection {
+        if let Some(RuntimeSelection::ThinkingLevel { level }) = &mut selection {
             let descriptor = catalog
                 .get(&seed.session.provider, &seed.session.model)
                 .ok_or_else(|| anyhow::anyhow!("current model descriptor is missing"))?;
@@ -691,16 +719,15 @@ impl RuntimePreparation {
         }
         let mut session = seed.session;
         let mut runtime_config = seed.runtime.runtime_config();
-        let runtime = EffectiveSwitch::from_runtime(&session, &runtime_config).select(
-            selection,
-            &session,
-            &seed.source_settings,
-        )?;
+        let mut runtime = EffectiveSwitch::from_runtime(&session, &runtime_config);
+        if let Some(selection) = selection {
+            runtime = runtime.select(selection, &session, &seed.source_settings)?;
+        }
         runtime.apply_validated(&mut session, &seed.source_settings, &catalog)?;
         runtime.apply_to_runtime(&mut runtime_config);
         let prepared = seed
             .runtime
-            .prepare_selection(&session, runtime_config, catalog)
+            .prepare_selection(&session, runtime_config, catalog, seed.source_settings)
             .await?;
         tokio::spawn(async move { agent.replace_runtime(prepared, session, None, true).await })
             .await?

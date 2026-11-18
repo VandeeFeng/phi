@@ -1,51 +1,18 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use phi_sdk::workspace::WorkspaceMeta;
 
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(2);
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
-const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct WorkspaceView {
     pub(crate) working_dir: PathBuf,
     pub(crate) git_branch: Option<String>,
-}
-
-struct GitDirectories {
-    repo_dir: PathBuf,
-    git_dir: PathBuf,
-    common_dir: PathBuf,
-}
-
-fn git_directories(working_dir: &Path) -> Option<GitDirectories> {
-    if !working_dir.is_dir() {
-        return None;
-    }
-    for directory in working_dir.ancestors() {
-        let dot_git = directory.join(".git");
-        let git_dir = if dot_git.is_dir() {
-            dot_git
-        } else if dot_git.is_file() {
-            let content = std::fs::read_to_string(dot_git).ok()?;
-            directory.join(content.trim().strip_prefix("gitdir: ")?)
-        } else {
-            continue;
-        };
-        let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
-            .map(|content| git_dir.join(content.trim()))
-            .unwrap_or_else(|_| git_dir.clone());
-        return Some(GitDirectories {
-            repo_dir: directory.to_path_buf(),
-            git_dir,
-            common_dir,
-        });
-    }
-    None
 }
 
 #[cfg(test)]
@@ -293,6 +260,8 @@ struct WorkspaceObservation {
     view: WorkspaceView,
     observed_at: Instant,
     invalidated: Arc<AtomicBool>,
+    topology_changed: Arc<AtomicBool>,
+    workspace: Option<WorkspaceMeta>,
     healthy: Arc<AtomicBool>,
     _watcher: Option<RecommendedWatcher>,
     directories: Vec<PathBuf>,
@@ -321,22 +290,42 @@ impl WorkspaceCache {
 
 impl WorkspaceObservation {
     async fn observe(working_dir: &Path, previous: Option<Self>) -> Self {
-        let git_directories = git_directories(working_dir);
+        let previous = previous.filter(|observation| observation.view.working_dir == working_dir);
+        let rediscover = previous.as_ref().is_none_or(|observation| {
+            !observation.healthy.load(Ordering::Acquire)
+                || observation.topology_changed.swap(false, Ordering::AcqRel)
+        });
+        if let Some(observation) = &previous {
+            observation.invalidated.store(false, Ordering::Release);
+        }
+        let workspace = if rediscover {
+            let directory = working_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || WorkspaceMeta::discover(directory, None))
+                .await
+                .ok()
+                .and_then(Result::ok)
+        } else {
+            previous
+                .as_ref()
+                .and_then(|observation| observation.workspace.clone())
+        };
         let mut directories = Vec::new();
         // Ancestors expose repository creation/removal even from a nested working directory.
         for directory in working_dir.ancestors() {
             directories.push(directory.to_path_buf());
-            if git_directories
-                .as_ref()
-                .is_some_and(|paths| paths.repo_dir == directory)
-            {
+            if workspace.as_ref().is_some_and(|workspace| {
+                workspace.git_dir().is_some() && workspace.root == directory
+            }) {
                 break;
             }
         }
-        if let Some(paths) = &git_directories {
-            for path in [&paths.git_dir, &paths.common_dir] {
-                if !directories.contains(path) {
-                    directories.push(path.clone());
+        if let Some(workspace) = &workspace {
+            for path in [workspace.git_dir(), workspace.common_dir()]
+                .into_iter()
+                .flatten()
+            {
+                if !directories.iter().any(|directory| directory == path) {
+                    directories.push(path.to_path_buf());
                 }
                 let reftable = path.join("reftable");
                 if reftable.is_dir() && !directories.contains(&reftable) {
@@ -346,17 +335,27 @@ impl WorkspaceObservation {
         }
         let mut observation = match previous {
             Some(observation)
-                if observation.view.working_dir == working_dir
-                    && observation.directories == directories
+                if observation.directories == directories
                     && observation.healthy.load(Ordering::Acquire) =>
             {
                 observation
             }
             _ => Self::watch(working_dir, directories),
         };
-        // Clear before reading so concurrent switches remain pending for the next observation.
-        observation.invalidated.store(false, Ordering::Release);
-        observation.view.git_branch = git_branch(working_dir, git_directories.as_ref()).await;
+        observation.view.git_branch = match &workspace {
+            Some(workspace) => match workspace.git_branch().await {
+                Ok(branch) => branch,
+                Err(_) => {
+                    observation.healthy.store(false, Ordering::Release);
+                    None
+                }
+            },
+            None => {
+                observation.healthy.store(false, Ordering::Release);
+                None
+            }
+        };
+        observation.workspace = workspace;
         observation.observed_at = Instant::now();
         observation
     }
@@ -364,6 +363,8 @@ impl WorkspaceObservation {
     fn watch(working_dir: &Path, directories: Vec<PathBuf>) -> Self {
         let invalidated = Arc::new(AtomicBool::new(false));
         let healthy = Arc::new(AtomicBool::new(true));
+        let topology_changed = Arc::new(AtomicBool::new(false));
+        let topology = topology_changed.clone();
         let changed = invalidated.clone();
         let watch_healthy = healthy.clone();
         let watched_directories = directories.clone();
@@ -371,15 +372,24 @@ impl WorkspaceObservation {
             notify::recommended_watcher(
                 move |result: notify::Result<notify::Event>| match result {
                     Ok(event) if !matches!(event.kind, EventKind::Access(_)) => {
-                        if event.need_rescan()
+                        let layout_changed = event.need_rescan()
                             || event.paths.iter().any(|path| {
                                 matches!(
                                     path.file_name().and_then(|name| name.to_str()),
-                                    Some("HEAD" | ".git" | "reftable" | "tables.list")
+                                    Some(".git" | "commondir" | "gitdir" | "config")
+                                ) || watched_directories.contains(path)
+                            });
+                        if layout_changed {
+                            topology.store(true, Ordering::Release);
+                        }
+                        if layout_changed
+                            || event.paths.iter().any(|path| {
+                                matches!(
+                                    path.file_name().and_then(|name| name.to_str()),
+                                    Some("HEAD" | "reftable" | "tables.list")
                                 ) || path
                                     .parent()
                                     .is_some_and(|parent| parent.ends_with("reftable"))
-                                    || watched_directories.contains(path)
                             })
                         {
                             changed.store(true, Ordering::Release);
@@ -414,42 +424,11 @@ impl WorkspaceObservation {
             },
             observed_at: Instant::now(),
             invalidated,
+            topology_changed,
+            workspace: None,
             healthy,
             _watcher: watcher,
             directories,
         }
     }
-}
-
-async fn git_branch(working_dir: &Path, directories: Option<&GitDirectories>) -> Option<String> {
-    let mut git_branch = directories
-        .and_then(|paths| std::fs::read_to_string(paths.git_dir.join("HEAD")).ok())
-        .and_then(|head| {
-            head.trim()
-                .strip_prefix("ref: refs/heads/")
-                .map(str::to_owned)
-        });
-    if git_branch.as_deref() == Some(".invalid") {
-        let mut command = tokio::process::Command::new("git");
-        command
-            .args([
-                "--no-optional-locks",
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "HEAD",
-            ])
-            .current_dir(working_dir)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        git_branch = match tokio::time::timeout(GIT_TIMEOUT, command.output()).await {
-            Ok(Ok(output)) if output.status.success() => String::from_utf8(output.stdout)
-                .ok()
-                .map(|branch| branch.trim().to_string())
-                .filter(|branch| !branch.is_empty()),
-            _ => None,
-        };
-    }
-    git_branch
 }

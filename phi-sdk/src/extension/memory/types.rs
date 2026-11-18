@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::utils::workspace::ProjectMeta;
-
 use super::tape::TapeConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,32 +109,6 @@ pub struct MemoryDirSettings {
     pub repo_url: Option<String>,
     pub local_path: Option<String>,
     pub global_memory: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryMeta {
-    #[serde(flatten)]
-    pub project_meta: ProjectMeta,
-    pub initialized: bool,
-    pub memory_path: String,
-    pub project: MemoryScopeMeta,
-    pub global: GlobalMemoryScopeMeta,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryScopeMeta {
-    pub scope: String,
-    pub dir: String,
-    pub exists: bool,
-    pub file_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalMemoryScopeMeta {
-    pub scope: String,
-    pub dir: Option<String>,
-    pub exists: bool,
-    pub file_count: Option<usize>,
 }
 
 #[cfg(test)]

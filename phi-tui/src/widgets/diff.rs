@@ -1,3 +1,4 @@
+use crate::render::text::wrap_tail;
 use crate::{StyledLine, ThemeColor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +86,7 @@ impl DiffView {
 }
 
 pub fn render_diff(diff: &DiffView, width: u16) -> Vec<StyledLine> {
-    render_diff_tail(diff, width, diff.lines.len()).0
+    render_diff_tail(diff, width, usize::MAX).0
 }
 
 pub(crate) fn render_diff_tail(
@@ -102,16 +103,26 @@ pub(crate) fn render_diff_tail(
         .unwrap_or(1)
         .to_string()
         .len();
-    let start = diff.lines.len().saturating_sub(max_rows);
-    let lines = diff.lines[start..]
-        .iter()
-        .map(|line| render_diff_line(line, line_width, width))
-        .collect();
-    (lines, diff.lines.len())
+    let mut retained = Vec::new();
+    let mut total_rows = 0;
+    for line in diff.lines.iter().rev() {
+        let (text, color) = format_diff_line(line, line_width);
+        let remaining_rows = max_rows.saturating_sub(retained.len());
+        let (lines, rows) = wrap_tail(&expand_tabs(&text), width as usize, remaining_rows);
+        total_rows += rows;
+        retained.extend(
+            lines
+                .into_iter()
+                .rev()
+                .map(|text| StyledLine::new(text, color).fit(width)),
+        );
+    }
+    retained.reverse();
+    (retained, total_rows)
 }
 
-fn render_diff_line(line: &DiffLine, line_width: usize, width: u16) -> StyledLine {
-    let (text, color) = match line {
+fn format_diff_line(line: &DiffLine, line_width: usize) -> (String, ThemeColor) {
+    match line {
         DiffLine::Change {
             kind,
             old_line,
@@ -126,8 +137,7 @@ fn render_diff_line(line: &DiffLine, line_width: usize, width: u16) -> StyledLin
             ThemeColor::Dim,
         ),
         DiffLine::Prefixed { color, text } => (text.clone(), *color),
-    };
-    StyledLine::new(expand_tabs(&text), color).fit(width)
+    }
 }
 
 fn format_change(
@@ -164,6 +174,40 @@ fn expand_tabs(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wraps_long_diff_lines_without_losing_content() {
+        for text in [
+            "document-content-".repeat(20),
+            "文档内容完整显示".repeat(20),
+            "👩‍💻🇨🇳e\u{301}".repeat(20),
+        ] {
+            let diff = DiffView {
+                lines: vec![
+                    DiffLine::change(DiffLineKind::Delete, Some(12), None, "old"),
+                    DiffLine::change(DiffLineKind::Insert, None, Some(12), &text),
+                ],
+            };
+            for width in [8, 20, 80] {
+                let lines = render_diff(&diff, width);
+                let actual = lines
+                    .iter()
+                    .map(|line| line.text.trim_end())
+                    .collect::<String>();
+                assert_eq!(actual, format!("-12 old+12 {text}"));
+                assert!(
+                    lines.iter().all(
+                        |line| crate::render::text::display_width(&line.text) <= width as usize
+                    )
+                );
+                for budget in [0, 1, 2, usize::MAX] {
+                    let (tail, total) = render_diff_tail(&diff, width, budget);
+                    assert_eq!(total, lines.len());
+                    assert_eq!(tail, lines[lines.len().saturating_sub(budget)..]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn renders_semantic_and_prefixed_diff_lines() {

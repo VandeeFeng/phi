@@ -328,7 +328,7 @@ struct ProviderRecoveryState {
 
 const DEFAULT_MAX_TURNS: usize = 100;
 const MAX_PROVIDER_RETRIES: usize = 3;
-const PROVIDER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const PROVIDER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One inner agent-loop turn within a core turn: a model response and, when
 /// requested, its tool batch whose results feed the next agent turn.
@@ -954,6 +954,10 @@ where
             recovery: ProviderRecovery {
                 reason,
                 attempt,
+                max_attempts: match reason {
+                    RecoveryReason::ProviderRetry => MAX_PROVIDER_RETRIES,
+                    RecoveryReason::ContextOverflow => 1,
+                },
                 delay_ms: delay.as_millis() as u64,
                 provider: self.runtime.provider_id().to_string(),
                 model: self.runtime.model_id().to_string(),
@@ -991,7 +995,9 @@ where
         {
             return None;
         }
-        let delay = PROVIDER_RETRY_DELAY * 2_u32.pow(recovery.retries as u32);
+        let delay = facts
+            .retry_after
+            .unwrap_or_else(|| PROVIDER_RETRY_DELAY * 2_u32.pow(recovery.retries as u32));
         recovery.retries += 1;
         let _ = events
             .send(self.recovery_event(RecoveryReason::ProviderRetry, recovery.retries, delay))

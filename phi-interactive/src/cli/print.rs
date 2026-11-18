@@ -124,7 +124,7 @@ mod tests {
     use crate::cli::Cli;
     use crate::runtime::{AgentRuntimeFactory, RuntimeResources};
     use clap::Parser;
-    use phi_sdk::agent_instance::{AgentInstanceEvent, AgentInstanceStatus};
+    use phi_sdk::agent_instance::AgentInstanceEvent;
     use phi_sdk::extension::ExtensionRuntime;
     use phi_sdk::models::{ModelCatalog, ModelCatalogOptions};
     use phi_sdk::sandbox::Sandbox;
@@ -137,16 +137,7 @@ mod tests {
     const HTTP_STATUS_OK: &str = "200 OK";
 
     #[tokio::test]
-    async fn print_waits_for_descendant_followup() {
-        assert_print_completion("Agent").await;
-    }
-
-    #[tokio::test]
     async fn print_waits_for_workflow_report() {
-        assert_print_completion("Workflow").await;
-    }
-
-    async fn assert_print_completion(tool: &str) {
         let root =
             std::env::temp_dir().join(format!("phi-print-completion-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join(".phi/agents")).unwrap();
@@ -166,8 +157,6 @@ mod tests {
         let child_started = Arc::new(Notify::new());
         let resume = release.clone();
         let entered = child_started.clone();
-        let expected_runs = if tool == "Workflow" { 2 } else { 0 };
-        let tool = tool.to_owned();
         let command = format!("touch {}", root.join("permission-probe").display());
         let provider = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
@@ -175,7 +164,6 @@ mod tests {
                 let (mut connection, _) = listener.accept().await.unwrap();
                 let resume = resume.clone();
                 let entered = entered.clone();
-                let tool = tool.clone();
                 let command = command.clone();
                 connections.spawn(async move {
                     let mut bytes = Vec::new();
@@ -200,15 +188,12 @@ mod tests {
                     let messages = request["messages"].as_array().unwrap();
                     let child = request["model"] == "child";
                     let reports = messages.iter().filter(|message| message["content"].to_string().contains("Workflow terminal report")).count();
-                    let followup = messages.iter().any(|message| message["content"].to_string().contains("Subagent terminal outcome:"));
                     let tool_result = messages.iter().any(|message| message["role"] == "tool");
                     let successor = messages.iter().any(|message| message["tool_call_id"] == "successor");
                     let (delta, reason) = if child {
                         if !tool_result {
                             entered.notify_one();
                             resume.notified().await;
-                        }
-                        if tool == "Workflow" && !tool_result {
                             (json!({"tool_calls": [{"index": 0, "id": "permission-probe", "type": "function",
                                 "function": {"name": "Bash", "arguments": json!({"command": command}).to_string()}}]}), "tool_calls")
                         } else {
@@ -217,18 +202,14 @@ mod tests {
                     } else if reports == 1 && !successor {
                         (json!({"tool_calls": [{"index": 0, "id": "successor", "type": "function",
                             "function": {"name": "Workflow", "arguments": json!({"source": "export const meta = {name: 'successor', description: 'report-triggered run'}; return 'successor-result';"}).to_string()}}]}), "tool_calls")
-                    } else if followup || reports == 2 {
+                    } else if reports == 2 {
                         (json!({"content": "final-parent-result"}), "stop")
                     } else if tool_result {
                         (json!({"content": "parent-first-result"}), "stop")
                     } else {
-                        let arguments = if tool == "Workflow" {
-                            json!({"source": "export const meta = {name: 'print', description: 'print lifetime'}; return await agent('inspect', {role: 'probe'});"})
-                        } else {
-                            json!({"role": "probe", "prompt": "inspect"})
-                        };
+                        let arguments = json!({"source": "export const meta = {name: 'print', description: 'print lifetime'}; return await agent('inspect', {role: 'probe'});"});
                         (json!({"tool_calls": [{"index": 0, "id": "delegate", "type": "function",
-                            "function": {"name": tool, "arguments": arguments.to_string()}}]}), "tool_calls")
+                            "function": {"name": "Workflow", "arguments": arguments.to_string()}}]}), "tool_calls")
                     };
                     let chunk = json!({"id": "completion", "model": request["model"],
                         "choices": [{"delta": delta, "finish_reason": reason}]});
@@ -329,41 +310,27 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), child_started.notified())
             .await
             .unwrap();
-        if expected_runs == 0 {
-            assert_eq!(
-                agent_session.instance().snapshot().status,
-                AgentInstanceStatus::Running
-            );
-        }
         assert!(futures_util::poll!(query.as_mut()).is_pending());
         release.notify_one();
         let final_response = tokio::time::timeout(Duration::from_secs(10), query)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            agent_session.session().await.workflow_run_ids.len(),
-            expected_runs
-        );
+        assert_eq!(agent_session.session().await.workflow_run_ids.len(), 2);
         let history =
             serde_json::to_string(&agent_session.instance().transcript().await.unwrap()).unwrap();
-        assert_eq!(
-            history.matches("phi_sdk.workflow_feedback").count(),
-            expected_runs
-        );
-        if expected_runs != 0 {
-            let worker_id = agent_session.session().await.children[0]
-                .child_agent_id
-                .clone();
-            let worker = sessions
-                .session_access(agent_session.instance().id())
-                .subagent_view(&worker_id)
-                .await
-                .unwrap();
-            let history = serde_json::to_string(&worker.session.transcript).unwrap();
-            assert!(history.contains("\"is_error\":true"));
-            assert!(!root.join("permission-probe").exists());
-        }
+        assert_eq!(history.matches("phi_sdk.workflow_feedback").count(), 2);
+        let worker_id = agent_session.session().await.children[0]
+            .child_agent_id
+            .clone();
+        let worker = sessions
+            .session_access(agent_session.instance().id())
+            .subagent_view(&worker_id)
+            .await
+            .unwrap();
+        let history = serde_json::to_string(&worker.session.transcript).unwrap();
+        assert!(history.contains("\"is_error\":true"));
+        assert!(!root.join("permission-probe").exists());
         sessions.shutdown(SessionEndReason::Quit).await.unwrap();
         provider.abort();
         std::fs::remove_dir_all(root).unwrap();

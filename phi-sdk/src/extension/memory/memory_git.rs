@@ -1,17 +1,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use chrono::Local;
 
-use crate::utils::workspace::git_root;
+use crate::utils::workspace::{WorkspaceMeta, git_command};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const FETCH_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const NETWORK_MAX_ATTEMPTS: usize = 3;
 const NETWORK_RETRY_DELAY: Duration = Duration::from_millis(250);
+const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TRANSIENT_NETWORK_ERRORS: &[&str] = &[
     "connection timed out",
     "connection timeout",
@@ -57,6 +58,7 @@ pub struct LocalMemoryGit {
     local_path: PathBuf,
     repo_url: Option<String>,
     timeout: Duration,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl LocalMemoryGit {
@@ -65,6 +67,7 @@ impl LocalMemoryGit {
             local_path: local_path.into(),
             repo_url,
             timeout: TIMEOUT,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -73,16 +76,25 @@ impl LocalMemoryGit {
         self
     }
 
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
     pub fn git_exec(&self, cwd: impl AsRef<Path>, args: &[&str]) -> GitResult {
         let cwd = cwd.as_ref();
         retry_git_command(
             args,
-            || {
-                let mut command = Command::new("git");
-                command.args(args).current_dir(cwd);
-                execute_git(command, self.timeout)
+            || execute_git(git_command(cwd, args), self.timeout, &self.cancellation),
+            |delay| {
+                let started = std::time::Instant::now();
+                while !self.cancellation.is_cancelled() && started.elapsed() < delay {
+                    thread::sleep(RETRY_POLL_INTERVAL.min(delay.saturating_sub(started.elapsed())));
+                }
             },
-            thread::sleep,
         )
     }
 
@@ -105,7 +117,9 @@ impl LocalMemoryGit {
     }
 
     fn is_initialized_repo(&self) -> bool {
-        git_root(&self.local_path).is_some_and(|root| same_path(root, &self.local_path))
+        WorkspaceMeta::discover(&self.local_path, Some(&self.cancellation)).is_ok_and(|workspace| {
+            workspace.git_dir().is_some() && same_path(workspace.root, &self.local_path)
+        })
     }
 
     fn should_fetch(&self) -> bool {
@@ -346,50 +360,12 @@ fn transient_network_failure(result: &GitResult) -> bool {
             .any(|signature| message.contains(signature))
 }
 
-fn execute_git(mut command: Command, timeout: Duration) -> GitResult {
-    let mut child = match command
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            return GitResult {
-                stdout: error.to_string(),
-                success: false,
-                timeout: false,
-            };
-        }
-    };
-
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return GitResult {
-                    stdout: String::new(),
-                    success: false,
-                    timeout: true,
-                };
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(20)),
-            Err(error) => {
-                let _ = child.kill();
-                return GitResult {
-                    stdout: error.to_string(),
-                    success: false,
-                    timeout: false,
-                };
-            }
-        }
-    }
-
-    match child.wait_with_output() {
+fn execute_git(
+    mut command: Command,
+    timeout: Duration,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> GitResult {
+    match crate::utils::process::run_sync(&mut command, timeout, Some(cancellation)) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -406,7 +382,7 @@ fn execute_git(mut command: Command, timeout: Duration) -> GitResult {
         Err(error) => GitResult {
             stdout: error.to_string(),
             success: false,
-            timeout: false,
+            timeout: error.kind() == std::io::ErrorKind::TimedOut,
         },
     }
 }

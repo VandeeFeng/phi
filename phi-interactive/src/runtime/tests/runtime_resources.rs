@@ -1,5 +1,111 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn print_teardown_cancels_background_hooks_but_runs_session_end() {
+    use phi_sdk::hooks::HookNotice;
+    use phi_sdk::lifecycle::{NotificationEvent, NotificationKind};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    for print in [true, false] {
+        for failed in [false, true] {
+            let entered = Arc::new(Notify::new());
+            let completed = Arc::new(AtomicBool::new(false));
+            let hooks = vec![
+                Hook::notification({
+                    let entered = entered.clone();
+                    let completed = completed.clone();
+                    move |_| {
+                        let entered = entered.clone();
+                        let completed = completed.clone();
+                        async move {
+                            entered.notify_one();
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            completed.store(true, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    }
+                }),
+                Hook::session_end(|_| async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(vec![HookNotice::Info {
+                        message: "session ended".into(),
+                    }])
+                }),
+            ];
+            let (root, policy, runtime) = session_test_runtime_with_hooks(hooks);
+            let mut configuration = policy.configuration.snapshot();
+            configuration.cli = Arc::new(if print {
+                Cli::parse_from(["phi", "-p"])
+            } else {
+                Cli::parse_from(["phi"])
+            });
+            let session = crate::session::new("local", "test", 128_000, &root);
+            let agent = runtime
+                .sessions
+                .create(
+                    &runtime.preparation,
+                    session.clone(),
+                    configuration.runtime_build_options(&session),
+                    SessionStartReason::Startup,
+                    false,
+                )
+                .await
+                .unwrap();
+            let resources = agent.runtime().sdk_resources();
+            resources.notify(NotificationEvent {
+                kind: NotificationKind::Message,
+                level: "info".into(),
+                message: "background work".into(),
+                tool_name: None,
+            });
+            entered.notified().await;
+            let started = tokio::time::Instant::now();
+            let result = crate::finalize_sessions(
+                &runtime.sessions,
+                if failed {
+                    Err(anyhow::anyhow!("execution failed"))
+                } else {
+                    Ok(Some("answer".into()))
+                },
+            )
+            .await;
+            assert_eq!(result.is_err(), failed);
+            assert_eq!(completed.load(Ordering::SeqCst), !print);
+            assert_eq!(resources.running_hook_count(), 0);
+            assert_eq!(
+                started.elapsed(),
+                if print {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(1)
+                }
+            );
+            let notices: Vec<_> = runtime
+                .sessions
+                .take_notices()
+                .unwrap()
+                .into_iter()
+                .flat_map(|notices| notices.hook_notices)
+                .collect();
+            assert!(notices.contains(&HookNotice::Info {
+                message: "session ended".into(),
+            }));
+            assert!(!notices.iter().any(|notice| matches!(
+                notice,
+                HookNotice::Warning { message } if message.contains("timed out")
+            )));
+            let cancelled = notices
+                .iter()
+                .filter(|notice| matches!(notice, HookNotice::Cancelled { event } if event == "Notification"))
+                .count();
+            assert_eq!(cancelled, usize::from(print));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn unloaded_builtin_mcp_does_not_inherit_a_shared_pool() {
     let (root, policy, _) = session_test_runtime();

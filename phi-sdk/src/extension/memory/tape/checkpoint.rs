@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use compact_str::CompactString;
 
 use super::anchor::{GitCheckpoint, TapeAnchor};
-use crate::utils::workspace::git_root;
+use crate::utils::workspace::{WorkspaceMeta, git_command};
 
 const MAX_REF_UPDATE_ATTEMPTS: usize = 8;
 
@@ -16,9 +16,10 @@ pub(super) struct GitCheckpointStore {
 }
 
 impl GitCheckpointStore {
-    pub(super) fn discover(cwd: &Path, session_id: &str) -> Option<Self> {
+    pub(super) fn discover(workspace: &WorkspaceMeta, session_id: &str) -> Option<Self> {
+        workspace.git_dir()?;
         Some(Self {
-            repository: git_root(cwd)?,
+            repository: workspace.root.clone(),
             reference: format!("refs/phi/tape/s-{}", hex(session_id.as_bytes())),
         })
     }
@@ -108,11 +109,7 @@ impl GitCheckpointStore {
     }
 
     fn command(&self, args: &[&str], index: Option<&Path>) -> Command {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(&self.repository)
-            .stdin(Stdio::null());
+        let mut command = git_command(&self.repository, args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);
         }
@@ -177,7 +174,8 @@ mod tests {
         repository.write("new.txt", "new\n");
         repository.write("ignored.txt", "ignored\n");
         let status = repository.git(&["status", "--short"]);
-        let store = GitCheckpointStore::discover(&repository.path, "session-1").unwrap();
+        let workspace = WorkspaceMeta::discover(&repository.path, None).unwrap();
+        let store = GitCheckpointStore::discover(&workspace, "session-1").unwrap();
 
         let first = store
             .capture(&TapeAnchor::new("first", TapeAnchorType::Normal))
@@ -214,7 +212,8 @@ mod tests {
         repository.write("tracked.txt", "base\n");
         repository.git(&["add", "tracked.txt"]);
         repository.git(&["commit", "-m", "base"]);
-        let store = GitCheckpointStore::discover(&repository.path, "session-1").unwrap();
+        let workspace = WorkspaceMeta::discover(&repository.path, None).unwrap();
+        let store = GitCheckpointStore::discover(&workspace, "session-1").unwrap();
         let first = store
             .capture(&TapeAnchor::new("first", TapeAnchorType::Normal))
             .unwrap();
@@ -237,7 +236,8 @@ mod tests {
     fn captures_repository_with_unborn_head() {
         let repository = TestRepository::new();
         repository.write("new.txt", "new\n");
-        let store = GitCheckpointStore::discover(&repository.path, "session-1").unwrap();
+        let workspace = WorkspaceMeta::discover(&repository.path, None).unwrap();
+        let store = GitCheckpointStore::discover(&workspace, "session-1").unwrap();
 
         let checkpoint = store
             .capture(&TapeAnchor::new("first", TapeAnchorType::Normal))

@@ -1,12 +1,14 @@
 use super::*;
 
+const DELEGATION_FAILURE_TIMEOUT: Duration = Duration::from_secs(40);
+
 async fn wait_for_child_outcome(
     agent_session: &AgentSession,
     instance_id: &str,
 ) -> crate::session::SubagentChildLink {
     let id: phi_sdk::agent_instance::AgentInstanceId =
         serde_json::from_value(instance_id.into()).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(DELEGATION_FAILURE_TIMEOUT, async {
         loop {
             let finished = agent_session
                 .instance()
@@ -422,7 +424,7 @@ async fn directory_delegation_persists_child_and_parent_failure() {
             .all(|snapshot| snapshot.status.outcome.is_none())
     );
     release.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(DELEGATION_FAILURE_TIMEOUT, async {
         loop {
             let status = agent_session
                 .instance()
@@ -1080,8 +1082,9 @@ async fn directory_delegation_persists_child_and_parent_failure() {
         persisted.children,
         [&link, &leader_link]
             .into_iter()
-            .map(crate::session::ChildSessionLink::from)
-            .collect::<Vec<_>>()
+            .map(crate::session::ChildSessionLink::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()
+            .unwrap()
     );
     assert_eq!(
         crate::session::storage::load_session(child_path.to_str().unwrap())

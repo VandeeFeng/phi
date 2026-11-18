@@ -38,7 +38,7 @@ impl InteractiveFeatures {
                 | BuiltinCommand::Switch(_)
                 | BuiltinCommand::Reload
                 | BuiltinCommand::Workflow => true,
-                BuiltinCommand::Model(command) => self.models.command(*command),
+                BuiltinCommand::Model(command) => self.models.command(command),
                 BuiltinCommand::RewindPicker => self.navigation,
                 BuiltinCommand::Tasks => self.activities,
                 BuiltinCommand::Login(_) => self.authentication,
@@ -67,9 +67,7 @@ impl InteractiveFeatures {
             UiAction::Pick(_) | UiAction::CycleSwitch(_) | UiAction::AdjustThinkingLevel(_) => true,
             UiAction::DeletePick(_)
             | UiAction::CycleSwitchField { .. }
-            | UiAction::SetSwitchAlias { .. }
-            | UiAction::SaveSwitchConfig
-            | UiAction::ApplySwitchConfig(_) => false,
+            | UiAction::SetSwitchAlias { .. } => false,
             UiAction::McpElicitationSubmit(_) | UiAction::McpElicitationOpenUrl(_) => self.mcp,
             UiAction::ToggleTasks
             | UiAction::BackgroundRunningBash
@@ -393,7 +391,6 @@ mod tests {
         }
         for action in [
             UiAction::ToggleTasks,
-            UiAction::SaveSwitchConfig,
             UiAction::Pick("switch:configure".into()),
             UiAction::DeletePick("resume:session".into()),
             UiAction::McpElicitationSubmit(Some(serde_json::json!({}))),
@@ -606,7 +603,7 @@ mod tests {
                 assert_eq!(command.arguments.is_some(), accepts_arguments, "{name}");
             }
             assert_eq!(
-                features.action(&UiAction::SaveSwitchConfig),
+                features.action(&UiAction::Pick("switch:configure".into())),
                 switch_configuration
             );
             assert_eq!(

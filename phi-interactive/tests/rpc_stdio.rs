@@ -341,7 +341,7 @@ impl Provider {
             .unwrap();
     }
     fn delegate(&self, agent: &str) {
-        self.reply(json!({"id":"completion","model":"test","choices":[{"delta":{"tool_calls":[{"index":0,"id":"delegate-call","type":"function","function":{"name":"Agent","arguments":json!({"role":agent,"prompt":"run task"}).to_string()}}]},"finish_reason":"tool_calls"}]}));
+        self.reply(json!({"id":"completion","model":"test","choices":[{"delta":{"tool_calls":[{"index":0,"id":"delegate-call","type":"function","function":{"name":"Agent","arguments":json!({"action":"create","role":agent,"prompt":"run task"}).to_string()}}]},"finish_reason":"tool_calls"}]}));
     }
     fn permission(&self) {
         self.reply(json!({"id":"completion","model":"test","choices":[{"delta":{"tool_calls":[{"index":0,"id":uuid::Uuid::new_v4().to_string(),"type":"function","function":{"name":"Bash","arguments":"{\"command\":\"printf rpc-permission\"}"}}]},"finish_reason":"tool_calls"}]}));

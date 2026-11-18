@@ -75,7 +75,10 @@ pub enum Scope {
 
 pub(crate) fn resource_roots_for(working_dir: &Path, kind: &str) -> Vec<(Scope, PathBuf)> {
     roots_for(
-        settings::project_scope_dir_for(working_dir).as_deref(),
+        settings::project_scope_dir_for(working_dir)
+            .ok()
+            .flatten()
+            .as_deref(),
         &settings::phi_path(),
         kind,
     )
@@ -224,7 +227,7 @@ impl ResourcePolicy {
         project: ResourceSettings,
     ) -> anyhow::Result<Self> {
         let global_dir = settings::phi_path();
-        let project_dir = settings::project_scope_dir_for(working_dir);
+        let project_dir = settings::project_scope_dir_for(working_dir)?;
         validate_patterns(&global)?;
         validate_patterns(&project)?;
         let global_dir = if global_dir.is_absolute() {

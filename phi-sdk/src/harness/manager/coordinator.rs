@@ -2292,10 +2292,12 @@ mod tests {
         let (reply, response) = tokio::sync::oneshot::channel();
         sender
             .send(crate::agent::tools::AgentToolRequest {
-                args: serde_json::from_value(serde_json::json!({
-                    "action": "message", "recipient": target.id(), "content": "continue work"
-                }))
-                .unwrap(),
+                args: crate::agent::tools::AgentArgs::Manage(
+                    crate::agent::tools::AgentManagementArgs::SendMessage {
+                        recipient: target.id().clone(),
+                        content: "continue work".into(),
+                    },
+                ),
                 scope: crate::core::event::CoreEventScope {
                     session_id: Some(source.id().as_str().into()),
                     turn_id: Some("message-turn".into()),

@@ -860,9 +860,9 @@ impl AgentSession {
                             related_session: None,
                         });
                 drop(session);
-                let resources = self.runtime().sdk_resources();
-                resources
-                    .session_ended(context.reason, context.related_session.as_deref())
+                let runtime = self.runtime().clone();
+                runtime
+                    .end_session_hooks(context.reason, context.related_session.as_deref())
                     .await;
             }
         }
@@ -1019,6 +1019,7 @@ pub(super) mod tests {
                 "child_agent_id": id,
                 "child_session_id": id,
                 "child_working_dir": "/tmp",
+                "mode": "background",
             }))
             .unwrap();
             child.workflow_run_id = owner;
@@ -3148,6 +3149,7 @@ mod workflow_tests {
         let child: crate::session::ChildSessionLink = serde_json::from_value(serde_json::json!({
             "child_agent_id": "ordinary-child", "child_session_id": "ordinary-child",
             "child_working_dir": root, "parent_tool_call_id": "ordinary-call",
+            "mode": "foreground",
         }))
         .unwrap();
         session.children.push(child.clone());
@@ -3201,6 +3203,7 @@ mod workflow_tests {
                     "child_agent_id": agent,
                     "child_session_id": agent,
                     "child_working_dir": root,
+                    "mode": "foreground",
                 }))
                 .unwrap();
             link.workflow_run_id = owner;

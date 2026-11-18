@@ -273,6 +273,19 @@ impl AgentRuntime {
         self.sdk_resources.clone()
     }
 
+    pub(super) async fn end_session_hooks(
+        &self,
+        reason: phi_sdk::lifecycle::SessionEndReason,
+        related_session: Option<&str>,
+    ) {
+        if self.mcp_intent.cli.print {
+            self.sdk_resources.cancel_background_hooks().await;
+        }
+        self.sdk_resources
+            .session_ended(reason, related_session)
+            .await;
+    }
+
     pub(crate) fn extensions(&self) -> Arc<ExtensionRuntime> {
         self.resources.extensions.clone()
     }
@@ -315,8 +328,10 @@ impl AgentRuntime {
         session: &Session,
         runtime_config: RuntimeConfig,
         catalog: Arc<phi_sdk::models::ModelCatalog>,
+        source_settings: Arc<Settings>,
     ) -> anyhow::Result<PreparedAgentRuntime> {
         let mut runtime = self.clone();
+        runtime.source_settings = Some(source_settings);
         Arc::make_mut(&mut runtime.mcp_intent).runtime_cfg = runtime_config;
         runtime.resources.model_catalog = catalog;
         runtime.prepare_replacement(session).await

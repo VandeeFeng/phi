@@ -138,6 +138,7 @@ pub enum RecoveryReason {
 pub struct ProviderRecovery {
     pub reason: RecoveryReason,
     pub attempt: usize,
+    pub max_attempts: usize,
     pub delay_ms: u64,
     pub provider: String,
     pub model: String,

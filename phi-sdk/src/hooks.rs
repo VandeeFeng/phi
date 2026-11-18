@@ -12,7 +12,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -147,9 +147,23 @@ pub(crate) struct HookControl {
     start_mode: Option<SessionStartMode>,
     timeout: Option<Duration>,
     allowance: Arc<Mutex<Arc<AtomicBool>>>,
+    running: Arc<AtomicUsize>,
+}
+
+struct RunningHook(Arc<AtomicUsize>);
+
+impl Drop for RunningHook {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl HookControl {
+    fn track(&self) -> RunningHook {
+        self.running.fetch_add(1, Ordering::SeqCst);
+        RunningHook(self.running.clone())
+    }
+
     pub(crate) fn validate_identities<'a>(
         controls: impl IntoIterator<Item = &'a Self>,
     ) -> HookResult<()> {
@@ -193,6 +207,7 @@ impl HookControl {
     fn fresh(&self) -> Self {
         Self {
             allowance: Arc::default(),
+            running: Arc::default(),
             ..self.clone()
         }
     }
@@ -545,6 +560,7 @@ struct HookRuntime {
     startup: tokio::sync::Mutex<StartupTasks>,
     notices: Mutex<Vec<HookNotice>>,
     notifications: Mutex<NotificationTasks>,
+    background_cancellation: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Default)]
@@ -616,6 +632,14 @@ impl HookRegistry {
         self.runtime.notices.lock().unwrap().extend(notices);
     }
 
+    pub(crate) fn running_hook_count(&self) -> usize {
+        self.registrations
+            .iter()
+            .filter_map(HookRegistration::control)
+            .map(|control| control.running.load(Ordering::SeqCst))
+            .sum()
+    }
+
     pub(crate) fn take_notices(&self) -> Vec<HookNotice> {
         std::mem::take(&mut *self.runtime.notices.lock().unwrap())
     }
@@ -643,12 +667,22 @@ impl HookRegistry {
     }
 
     pub(crate) fn schedule_notification(&self, event: NotificationEvent) {
+        if self.runtime.background_cancellation.is_cancelled() {
+            return;
+        }
+        let cancellation = self.runtime.background_cancellation.clone();
         let snapshot = self.task_snapshot();
         let runtime = Arc::downgrade(&self.runtime);
         let mut notifications = self.runtime.notifications.lock().unwrap();
         notifications.tasks.retain(|task| !task.is_finished());
         notifications.tasks.push_back(tokio::spawn(async move {
-            emit_notification(&snapshot, event).await;
+            let result =
+                run_background_hook(&cancellation, LifecycleEventKind::Notification, async {
+                    emit_notification(&snapshot, event).await;
+                    Ok(Vec::new())
+                })
+                .await;
+            snapshot.record_hook_result(result);
             if let Some(runtime) = runtime.upgrade() {
                 runtime
                     .notices
@@ -659,7 +693,12 @@ impl HookRegistry {
         }));
     }
 
-    #[cfg(test)]
+    pub(crate) async fn cancel_background_hooks(&self) {
+        self.runtime.background_cancellation.cancel();
+        self.await_startup().await;
+        self.flush_notifications().await;
+    }
+
     async fn flush_notifications(&self) {
         let pending = std::mem::take(&mut *self.runtime.notifications.lock().unwrap());
         pending.finish().await;
@@ -907,6 +946,7 @@ impl Hook {
         if !self.control.start(&input) {
             return Ok(skipped);
         }
+        let _running = self.control.track();
         callback(input, self.control.timeout(DEFAULT_HOOK_TIMEOUT)).await
     }
 
@@ -1164,17 +1204,26 @@ impl fmt::Debug for Hook {
     }
 }
 
+async fn run_handler_with_timeout<T>(
+    handler: &dyn HookHandler,
+    future: impl Future<Output = T>,
+    default: Duration,
+) -> Result<T, tokio::time::error::Elapsed> {
+    let _running = handler.control().map(HookControl::track);
+    match handler.timeout(default) {
+        Some(timeout) => tokio::time::timeout(timeout, future).await,
+        None => Ok(future.await),
+    }
+}
+
 async fn run_handler(
     handler: &dyn HookHandler,
     event: &LifecycleEvent,
     timeout: Duration,
 ) -> anyhow::Result<Option<HookResponse>> {
-    let result = match handler.timeout(timeout) {
-        Some(timeout) => tokio::time::timeout(timeout, handler.handle(event))
-            .await
-            .map_err(|_| anyhow::anyhow!("{} hook timed out", event.kind.as_str()))?,
-        None => handler.handle(event).await,
-    }?;
+    let result = run_handler_with_timeout(handler, handler.handle(event), timeout)
+        .await
+        .map_err(|_| anyhow::anyhow!("{} hook timed out", event.kind.as_str()))??;
     anyhow::ensure!(
         event.kind != LifecycleEventKind::Notification
             || !result.as_ref().is_some_and(HookResponse::should_stop),
@@ -1851,13 +1900,19 @@ pub(crate) async fn emit_session_start(
                     let hook = hook.clone();
                     let registration = registration.clone();
                     let event = event.clone();
+                    let cancellation = bus.runtime.background_cancellation.clone();
                     bus.runtime
                         .startup
                         .lock()
                         .await
                         .tasks
                         .push_back(tokio::spawn(async move {
-                            registration.invoke(&hook, event, Vec::new()).await
+                            run_background_hook(
+                                &cancellation,
+                                LifecycleEventKind::SessionStart,
+                                registration.invoke(&hook, event, Vec::new()),
+                            )
+                            .await
                         }));
                 } else {
                     bus.record_hook_result(
@@ -2375,9 +2430,22 @@ async fn run_handler_gate<T>(
     future: impl Future<Output = HookResult<T>>,
     default: Duration,
 ) -> HookResult<T> {
-    match handler.timeout(default) {
-        Some(timeout) => run_hook(future, timeout).await,
-        None => future.await,
+    run_handler_with_timeout(handler, future, default)
+        .await
+        .map_err(|_| HookError::new("lifecycle hook timed out"))?
+}
+
+async fn run_background_hook(
+    cancellation: &tokio_util::sync::CancellationToken,
+    event: LifecycleEventKind,
+    future: impl Future<Output = HookResult<Vec<HookNotice>>>,
+) -> HookResult<Vec<HookNotice>> {
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Ok(vec![HookNotice::Cancelled {
+            event: event.as_str().into(),
+        }]),
+        result = future => result,
     }
 }
 

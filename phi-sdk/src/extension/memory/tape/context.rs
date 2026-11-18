@@ -16,7 +16,7 @@ use crate::extension::memory::utils::graph_value;
 use crate::transcript::{
     AgentMessage, ContentBlock, Transcript, TranscriptEntry, TranscriptEntryKind, UserContentBlock,
 };
-use crate::utils::workspace::get_project_meta;
+use crate::utils::workspace::WorkspaceMeta;
 
 use super::reader::get_entries_after_timestamp;
 use super::types::TapeSessionScanOptions;
@@ -297,38 +297,16 @@ pub struct MemoryFileSelector {
 impl MemoryFileSelector {
     pub fn new(
         memory_dir: impl Into<PathBuf>,
-        project_root: impl Into<PathBuf>,
+        workspace: &WorkspaceMeta,
         whitelist: Vec<String>,
         blacklist: Vec<String>,
     ) -> Self {
+        let project_root = workspace.root.clone();
         let memory_dir = memory_dir.into();
-        let project_name = memory_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("project")
-            .to_string();
-        Self::new_for_project(
-            memory_dir,
-            project_root,
-            &project_name,
-            whitelist,
-            blacklist,
-        )
-    }
-
-    pub fn new_for_project(
-        memory_dir: impl Into<PathBuf>,
-        project_root: impl Into<PathBuf>,
-        project_name: &str,
-        whitelist: Vec<String>,
-        blacklist: Vec<String>,
-    ) -> Self {
-        let project_root = project_root.into();
-        let memory_dir = memory_dir.into();
-        let is_worktree = get_project_meta(&project_root).is_worktree;
+        let is_worktree = workspace.is_worktree();
         Self {
             memory_dir,
-            project_name: project_name.to_string(),
+            project_name: workspace.name().to_string(),
             project_root,
             whitelist: dedup(whitelist),
             blacklist: dedup(blacklist),
@@ -1133,8 +1111,12 @@ mod tests {
         std::fs::create_dir_all(&memory_dir).unwrap();
         std::fs::write(&active_file, "fn active() {}\n").unwrap();
 
-        let mut selector =
-            MemoryFileSelector::new_for_project(&memory_dir, &root, "test", Vec::new(), Vec::new());
+        let mut selector = MemoryFileSelector::new(
+            &memory_dir,
+            &WorkspaceMeta::discover(&root, None).unwrap(),
+            Vec::new(),
+            Vec::new(),
+        );
         selector.project_graph = Some(MemoryGraph::new(
             vec![MemoryGraphNodeView {
                 id: anchor_node_id("checkpoint"),

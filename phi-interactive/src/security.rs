@@ -105,7 +105,7 @@ pub(crate) fn execution_sandbox(
         return Ok(sandbox);
     }
     let local_dir = std::env::current_dir()?;
-    let project = crate::config::settings::project_scope_dir_for(working_dir);
+    let project = crate::config::settings::project_scope_dir_for(working_dir)?;
     let mut roots = vec![
         local_dir.join(settings_write_root(crate::config::settings::phi_path())),
         local_dir.join(crate::config::SettingsLock::path_for(

@@ -27,6 +27,9 @@ pub enum HookNotice {
     Warning {
         message: String,
     },
+    Cancelled {
+        event: String,
+    },
     ContextInjected {
         source: ContextSource,
         item_count: usize,

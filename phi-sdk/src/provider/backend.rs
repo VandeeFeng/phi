@@ -14,11 +14,69 @@ use crate::models::{ModelDescriptor, ModelInput};
 use crate::permission::runtime::PermissionRuntime;
 use crate::sandbox::Sandbox;
 use rig::client::{CompletionClient, ModelListingClient};
-use rig::completion::{CompletionError, CompletionModel, Message};
+use rig::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Message,
+    ProviderCapabilities,
+};
 use rig::message::{ToolResultContent, UserContent};
+use rig::providers::openai::responses_api::{ResponsesCompletionModel, ResponsesToolDefinition};
 use rig::providers::{anthropic, deepseek, gemini, ollama, openai, openrouter};
 use rig::streaming::StreamingCompletionResponse;
 use std::collections::HashMap;
+
+#[derive(Clone)]
+pub(crate) struct ResponsesModel(ResponsesCompletionModel<ProviderTransport>);
+
+impl From<ResponsesCompletionModel<ProviderTransport>> for ResponsesModel {
+    fn from(model: ResponsesCompletionModel<ProviderTransport>) -> Self {
+        Self(model)
+    }
+}
+
+impl CompletionModel for ResponsesModel {
+    async fn completion(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, CompletionError> {
+        self.0
+            .clone()
+            .with_tools(take_responses_tools(&mut request))
+            .completion(request)
+            .await
+    }
+
+    async fn stream(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        self.0
+            .clone()
+            .with_tools(take_responses_tools(&mut request))
+            .stream(request)
+            .await
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.0.capabilities()
+    }
+}
+
+pub(super) fn take_responses_tools(
+    request: &mut CompletionRequest,
+) -> Vec<ResponsesToolDefinition> {
+    std::mem::take(&mut request.tools)
+        .into_iter()
+        .map(|tool| {
+            let tool = ResponsesToolDefinition::from(tool);
+            if tool.name == "Agent" {
+                // Rig skips its false strict field; flattened config preserves explicit opt-out.
+                tool.with_config("strict", false.into())
+            } else {
+                tool
+            }
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Default)]
 pub(crate) enum ProviderHistoryPolicy {
@@ -157,7 +215,7 @@ impl AnyClient {
             ClientBackend::OpenRouter(client) => {
                 AnyModel::OpenRouter(client.completion_model(name))
             }
-            ClientBackend::OpenAI(client) => AnyModel::OpenAI(client.completion_model(name)),
+            ClientBackend::OpenAI(client) => AnyModel::OpenAI(client.completion_model(name).into()),
             ClientBackend::OpenAICompletions(client) => {
                 AnyModel::OpenAICompletions(client.completion_model(name))
             }
@@ -347,7 +405,7 @@ fn prepare_message<M: CompletionModel + Clone + Send + 'static>(
 
 enum AnyModel {
     OpenRouter(openrouter::completion::CompletionModel<ProviderTransport>),
-    OpenAI(openai::responses_api::ResponsesCompletionModel<ProviderTransport>),
+    OpenAI(ResponsesModel),
     OpenAICompletions(openai::completion::CompletionModel<ProviderTransport>),
     ChatGPT(auth::ChatGPTModel),
     Anthropic(anthropic::completion::CompletionModel<ProviderTransport>),
@@ -386,7 +444,7 @@ impl AnyModel {
 #[derive(Clone)]
 pub(crate) enum AnyRuntime {
     OpenRouter(AgentRuntime<openrouter::completion::CompletionModel<ProviderTransport>>),
-    OpenAI(AgentRuntime<openai::responses_api::ResponsesCompletionModel<ProviderTransport>>),
+    OpenAI(AgentRuntime<ResponsesModel>),
     OpenAICompletions(AgentRuntime<openai::completion::CompletionModel<ProviderTransport>>),
     ChatGPT(AgentRuntime<auth::ChatGPTModel>),
     Anthropic(AgentRuntime<anthropic::completion::CompletionModel<ProviderTransport>>),
@@ -442,7 +500,7 @@ impl AnyRuntime {
         map_runtime_client!(self, client, |runtime, provider| {
             let runtime = if let Some(descriptor) = descriptor {
                 runtime
-                    .model(provider.completion_model(descriptor.id.clone()))
+                    .model(provider.completion_model(descriptor.id.clone()).into())
                     .usage_model(&descriptor.provider, &descriptor.id)
                     .model_cost(descriptor.cost.clone())
                     .history_policy(
@@ -701,6 +759,105 @@ mod tests {
             context_window: 128_000,
             max_output_tokens: 16_384,
             cost: crate::models::ModelCost::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_sends_explicit_agent_strict_false() {
+        use rig::completion::{CompletionModel, ToolDefinition};
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let providers = HashMap::from([(
+            "openai".into(),
+            CustomProviderConfig {
+                api: ProviderApi::OpenAiResponses,
+                base_url: Some(format!("http://{}/v1", listener.local_addr().unwrap())),
+                api_key: None,
+            },
+        )]);
+        let client = create_client("openai", Some("test-key"), &providers).unwrap();
+        let ClientBackend::OpenAI(client) = client.backend else {
+            panic!("expected Responses client");
+        };
+        let model = ResponsesModel::from(client.completion_model("test-model"));
+        use rig::tool::Tool;
+        let agent = crate::agent::tools::AgentTool::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+            &crate::agent::custom::AgentCatalog::new(Vec::new()),
+            None,
+        );
+        let parameters = agent.parameters();
+        let request = model
+            .completion_request("Inspect.")
+            .tools(vec![
+                ToolDefinition {
+                    name: "Agent".into(),
+                    description: agent.description(),
+                    parameters: parameters.clone(),
+                },
+                ToolDefinition {
+                    name: "Task".into(),
+                    description: "Track work".into(),
+                    parameters: json!({"type":"object", "properties":{}}),
+                },
+            ])
+            .build();
+
+        for streaming in [false, true] {
+            let capture = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut headers = String::new();
+                while !headers.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut headers).await.unwrap(), 0);
+                }
+                let len = headers
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let mut bytes = vec![0; len];
+                stream.read_exact(&mut bytes).await.unwrap();
+                stream
+                .get_mut()
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            };
+            let (_, wire) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let run = async {
+                    use futures::StreamExt;
+                    if streaming {
+                        model.stream(request.clone()).await.unwrap().next().await;
+                    } else {
+                        let _ = model.completion(request.clone()).await;
+                    }
+                };
+                tokio::join!(run, capture)
+            })
+            .await
+            .unwrap();
+            let tools = wire["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 2);
+            let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let agent = tool("Agent");
+            assert_eq!(agent.get("strict"), Some(&json!(false)));
+            let schema = &agent["parameters"];
+            assert_eq!(schema, &parameters);
+            assert_eq!(
+                schema["properties"]["action"]["enum"],
+                json!(["create", "list", "message"])
+            );
+            assert_eq!(schema["required"], json!(["action"]));
+            assert!(schema["properties"].get("role").is_some());
+            assert!(tool("Task").get("strict").is_none());
         }
     }
 

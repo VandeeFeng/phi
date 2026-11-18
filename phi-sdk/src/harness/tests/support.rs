@@ -55,7 +55,7 @@ pub(in crate::harness) fn completion(request: &Value) -> Value {
         .iter()
         .any(|message| message["role"] == "tool");
     let delta = if directed && !replied {
-        let arguments = json!({"role": "probe", "prompt": "delegated-task"});
+        let arguments = json!({"action": "create", "role": "probe", "prompt": "delegated-task"});
         json!({"tool_calls": [{"index": 0, "id": "call_agent", "type": "function",
             "function": {"name": "Agent", "arguments": arguments.to_string()}}]})
     } else {

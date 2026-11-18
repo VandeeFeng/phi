@@ -208,6 +208,7 @@ mod tests {
                 let worker: ChildSessionLink = serde_json::from_value(serde_json::json!({
                     "child_agent_id": "worker", "child_session_id": "worker",
                     "child_working_dir": "/tmp", "parent_tool_call_id": saved_call,
+                    "mode": "foreground",
                 }))
                 .unwrap();
                 let invocation = WorkflowInvocation {

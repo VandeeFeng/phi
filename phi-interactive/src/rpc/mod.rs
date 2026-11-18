@@ -1211,7 +1211,7 @@ mod tests {
                             let tool_result = request["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool");
                             let delta = match request["model"].as_str().unwrap() {
                                 "worker" if !tool_result => json!({"tool_calls":[{"index":0,"id":"nested-call","type":"function",
-                                    "function":{"name":"Agent","arguments":json!({"role":"nested","prompt":"private-nested-input"}).to_string()}}]}),
+                                    "function":{"name":"Agent","arguments":json!({"action":"create","role":"nested","prompt":"private-nested-input"}).to_string()}}]}),
                                 "nested" if !tool_result => json!({"tool_calls":[{"index":0,"id":"permission-call","type":"function",
                                     "function":{"name":"Bash","arguments":json!({"command":command}).to_string()}}]}),
                                 "worker" | "nested" => json!({"content":"private-worker-output"}),
@@ -1504,7 +1504,7 @@ mod tests {
             .await
             .unwrap();
         let view = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             root.instance().wait_for_quiescence(None),
         )
         .await

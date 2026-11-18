@@ -23,10 +23,11 @@ pub(in crate::interactive) fn render(
     lines
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(in crate::interactive) struct RunStatusView {
     pub(in crate::interactive) active: bool,
     pub(in crate::interactive) frame: usize,
+    pub(in crate::interactive) label: Option<String>,
 }
 
 impl RunStatusView {
@@ -42,7 +43,10 @@ impl RunStatusView {
                     ThemeColor::Accent,
                 ),
                 (" ", ThemeColor::Default),
-                ("Cooking...", ThemeColor::Muted),
+                (
+                    self.label.as_deref().unwrap_or("Cooking..."),
+                    ThemeColor::Muted,
+                ),
             ])
             .fit(width),
         ]
@@ -111,11 +115,13 @@ mod tests {
                 let idle = RunStatusView {
                     active: false,
                     frame,
+                    label: None,
                 };
                 assert!(idle.render(width).is_empty());
                 let active = RunStatusView {
                     active: true,
                     frame,
+                    label: None,
                 };
                 let lines = active.render(width);
                 assert_eq!(lines.len(), 2);

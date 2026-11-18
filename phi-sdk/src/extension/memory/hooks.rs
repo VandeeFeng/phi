@@ -300,6 +300,8 @@ impl MemoryHooks {
         if !self.settings.enabled.unwrap_or(true) {
             return Vec::new();
         }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
         let mut notices = Vec::new();
         for action in get_hook_actions(&self.settings, trigger) {
             let git = LocalMemoryGit::new(
@@ -309,7 +311,8 @@ impl MemoryHooks {
                     .as_ref()
                     .and_then(|dir| dir.repo_url.clone())
                     .or_else(|| self.settings.repo_url.clone()),
-            );
+            )
+            .with_cancellation(cancellation.clone());
             let operation = action.clone();
             let result = tokio::task::spawn_blocking(move || match operation {
                 HookAction::Pull => git.pull(),
@@ -699,6 +702,91 @@ mod tests {
             updated
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_end_budget_stops_memory_git_before_runtime_exit() {
+        const CHILD_ROOT: &str = "PHI_TEST_MEMORY_HOOK_EXIT_ROOT";
+        const TEST_NAME: &str = "extension::memory::hooks::tests::session_end_budget_stops_memory_git_before_runtime_exit";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let settings = memory_core::settings_from_config(&super::super::MemoryConfig {
+                memory_dir: Some(super::super::MemoryDirSettings {
+                    local_path: Some(root.display().to_string()),
+                    repo_url: Some(root.display().to_string()),
+                    ..Default::default()
+                }),
+                hooks: Some(HookConfig {
+                    session_start: Vec::new(),
+                    session_end: vec![HookAction::Push],
+                    user_prompt_submit: Vec::new(),
+                }),
+                ..Default::default()
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut registry = crate::hooks::HookRegistry::new();
+                for hook in MemoryHooks::new(settings).hooks() {
+                    registry.register_hook(hook);
+                }
+                crate::hooks::emit_session_end(
+                    &registry,
+                    crate::lifecycle::SessionEndReason::Quit,
+                    None,
+                )
+                .await;
+                assert!(root.join(".git/hook-started").exists());
+                assert!(registry.take_notices().iter().any(|notice| matches!(
+                    notice,
+                    HookNotice::Warning { message } if message == "SessionEnd timed out"
+                )));
+            });
+            drop(runtime);
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("phi-memory-hook-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.name", "Phi"],
+            vec!["config", "user.email", "phi@example.invalid"],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        std::fs::write(root.join("note.md"), "pending memory change").unwrap();
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ntouch .git/hook-started\nsleep 30 &\nwait\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ROOT, &root);
+        let result =
+            crate::utils::process::run_sync(&mut child, std::time::Duration::from_secs(5), None);
+        std::fs::remove_dir_all(root).unwrap();
+        let output = result.expect("Memory Git blocked process exit past the SessionEnd budget");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

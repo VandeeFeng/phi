@@ -438,6 +438,7 @@ async fn parent_checkpoints_child_link_and_canonical_history() {
         alias: None,
         parent_tool_call_id: None,
         workflow_run_id: None,
+        mode: phi_sdk::agent_manager::DelegationMode::Background,
         recovered_outcome: None,
     };
     agent_session
@@ -566,6 +567,7 @@ async fn parent_checkpoints_child_link_and_canonical_history() {
             alias: None,
             parent_tool_call_id: None,
             workflow_run_id: None,
+            mode: phi_sdk::agent_manager::DelegationMode::Background,
             recovered_outcome: None,
         })
         .await

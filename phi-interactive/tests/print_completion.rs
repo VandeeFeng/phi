@@ -340,7 +340,7 @@ end)
                         let (name, arguments) = match tool_count {
                             0 => ("Task", json!({"action": "create", "subject": "Unfinished inspection", "description": "Independent checklist work"})),
                             1 => ("Task", json!({"action": "update", "task_id": "1", "status": "in_progress"})),
-                            _ => ("Agent", json!({"role": "probe", "prompt": "inspect"})),
+                            _ => ("Agent", json!({"action": "create", "role": "probe", "prompt": "inspect"})),
                         };
                         (json!({"tool_calls": [{"index": 0, "id": format!("call-{tool_count}"), "type": "function",
                             "function": {"name": name, "arguments": arguments.to_string()}}]}), "tool_calls")
@@ -466,7 +466,7 @@ async fn print_waits_for_message_follow_up() {
             } else {
                 let messages = request["messages"].as_array().unwrap();
                 if !messages.iter().any(|message| message["role"] == "tool") {
-                    reply.send(call(json!({"role":"probe","prompt":"initial inspection"}))).unwrap();
+                    reply.send(call(json!({"action":"create","role":"probe","prompt":"initial inspection"}))).unwrap();
                 } else if request["messages"].to_string().contains("Subagent terminal outcome:") && !invoked {
                     let marker = "Subagent terminal outcome:\n";
                     let content = messages.iter().filter_map(|message| message["content"].as_str()).find(|content| content.contains(marker)).unwrap();
@@ -560,8 +560,8 @@ async fn print_named_subagents_claim_message_complete_and_unblock() {
                     3 => {
                         assert!(read_task("1")["owner"].is_null());
                         assert_eq!(read_task("2")["blocked_by"], json!(["1"]));
-                        let mut launches = call("Agent", json!({"role": "probe", "alias": "security", "prompt": "security-work: claim Task 1, report and complete it"}));
-                        let mut performance = call("Agent", json!({"role": "probe", "alias": "performance", "prompt": "performance-work: claim Task 2 only when unblocked, report and complete it"}));
+                        let mut launches = call("Agent", json!({"action": "create", "role": "probe", "alias": "security", "prompt": "security-work: claim Task 1, report and complete it"}));
+                        let mut performance = call("Agent", json!({"action": "create", "role": "probe", "alias": "performance", "prompt": "performance-work: claim Task 2 only when unblocked, report and complete it"}));
                         performance["tool_calls"][0]["index"] = json!(1);
                         launches["tool_calls"].as_array_mut().unwrap().push(performance["tool_calls"][0].clone());
                         launches

@@ -147,17 +147,19 @@ See [creation coordination](../../phi-sdk/src/harness/manager/coordinator.rs) an
 
 ## Agent delegation and working directory
 
-The Agent tool exposes creation, discovery and messaging (schematic, not the complete schema):
+One `Agent` tool exposes creation, discovery and messaging through a flat JSON object:
 
-```text
-New instance:       Agent(role, prompt, alias?, working_dir?, mode?)
-Discover members:   Agent(action="list")
-Existing instance:  Agent(action="message", recipient, content)
+```jsonl
+{"action":"create","role":"reviewer","prompt":"Review changes."}
+{"action":"list"}
+{"action":"message","recipient":"agent-id","content":"Review authentication next."}
 ```
+
+All calls require `action`. For `create`, the `alias`, `working_dir` and `mode` are optional. The provider schema advertises the flat field set; the Agent adapter rejects non-object input, unknown fields and fields mixed across actions before dispatch. OpenAI Responses and Codex convert Agent definitions with explicit `strict: false` at the provider model boundary; HTTP transport does not rewrite tool definitions. Typed SDK creation and messaging are unchanged. Local validation operates on provider-parsed arguments, without separate raw-fragment buffering or duplicate-key detection.
 
 Creation and management inputs are mutually exclusive. Messages reject creation options and preserve recipient configuration. Sending returns acceptance, not recipient completion or a reply. The Agent chooses the recipient and work; Manager does not. The model surface has no executor, receipt-wait or delivery-timeout controls; typed SDK receipt observations remain available.
 
-For creation, an omitted directory uses the immediate parent's execution directory; relative paths resolve against that directory, not process CWD. The target must already exist and pass canonical-path and execution-security validation. Invalid, unauthorized, or disappearing directories fail without fallback or recreation.
+For creation, omitting `working_dir` uses the immediate parent's execution directory; relative paths resolve against that directory, not process CWD. The target must already exist and pass canonical-path and execution-security validation. Invalid, unauthorized, or disappearing directories fail without fallback or recreation.
 
 Directory preparation runs on the blocking pool on a bounded ordered path before admission reservation. Abort, stop or caller abandonment discards unresolved preparation so late filesystem completion cannot create a child. Runtime replacement rejects pending preparation. `@agent` directed creation cannot be replaced by retained assignment or fallback Git commands. See [tool schema](../../phi-sdk/src/agent/tools/agent.rs), [Instance delegation](../../phi-sdk/src/harness/instance/execution/delegation.rs), and [directory validation](../../phi-sdk/src/harness/manager/preparation.rs).
 
@@ -330,7 +332,7 @@ See [Instance control and owned observation](../../phi-sdk/src/harness/instance/
 
 ## Session storage, retention, and recovery
 
-Each persisted instance has its own Session journal. Root and teammate journals use `<timestamp>-<session-id>.jsonl` in their working-directory scope. Ordinary subagents inherit their immediate parent's storage association, regardless of execution directory, and use `<parent-session-id>/subagents/agent-<child-session-id>.jsonl`; nested children extend the ancestry. Follow-up retains the original file and creation association. Child history is never copied into parent history. See [ordinary sidechains and teammate history](design-agent-task.md#ordinary-sidechains-and-teammate-history).
+Each persisted instance has its own Session journal. Root and teammate journals use `<timestamp>-<session-id>.jsonl` in their working-directory scope. Ordinary subagents inherit their immediate parent's storage association, regardless of execution directory, and use `<parent-session-id>/subagents/agent-<child-session-id>.jsonl`; nested children extend the ancestry. Follow-up retains the original file and creation association. Child history is never copied into parent history. Persisted child links require the resolved creation delegation mode; recovery never infers it from tool arguments, current defaults or outcomes. See [ordinary sidechains and teammate history](design-agent-task.md#ordinary-sidechains-and-teammate-history).
 
 | State | Authority | Release boundary |
 | --- | --- | --- |

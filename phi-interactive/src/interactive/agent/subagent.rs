@@ -26,6 +26,34 @@ pub(crate) struct SubagentRun {
 }
 
 impl SubagentRun {
+    fn new(state: &mut UiState, link: SubagentChildLink) -> Self {
+        let background = link.mode == Some(phi_sdk::agent_manager::DelegationMode::Background)
+            || foreground_wait_released(state, &link);
+        let block = if background {
+            None
+        } else {
+            Some(project_summary_block(state, &link))
+        };
+        let run = Self {
+            link,
+            block,
+            revision: None,
+            headers_requested: false,
+            detail: None,
+            detail_pending: false,
+            compact_enabled: None,
+        };
+        project_status(state, &run);
+        run
+    }
+
+    fn restore_summary(&mut self, state: &mut UiState) {
+        self.block = self.block.map(|_| project_summary_block(state, &self.link));
+        self.revision = None;
+        self.headers_requested = false;
+        project_status(state, self);
+    }
+
     pub(crate) fn toggle_all_collapsible_blocks(&mut self) -> bool {
         self.detail
             .as_mut()
@@ -61,7 +89,7 @@ impl SubagentProjection {
         state: &mut UiState,
     ) -> anyhow::Result<bool> {
         self.reset_for(main.id());
-        self.reset_projection(state);
+        self.restore_projection(state);
         if !state.features.activities {
             return Ok(false);
         }
@@ -176,52 +204,45 @@ impl SubagentProjection {
 
     pub(crate) fn restore_summaries(&mut self, state: &mut UiState, parent: &Session) {
         self.reset_for(&AgentInstanceId::new(parent.id.as_str()));
-        self.reset_projection(state);
+        self.restore_projection(state);
         for link in &parent.children {
-            self.project_summary(state, link.into());
-            if let Some(block) = self
+            let block = match self
                 .runs
                 .iter()
                 .find(|run| run.link.child_agent_id == link.child_agent_id)
-                .and_then(|run| run.block)
             {
+                Some(run) => run.block,
+                None => {
+                    let run = SubagentRun::new(state, link.into());
+                    let block = run.block;
+                    self.runs.push(run);
+                    block
+                }
+            };
+            if let Some(block) = block {
                 state.conversation.restore_subagent_position(block);
             }
         }
     }
 
     fn project_summary(&mut self, state: &mut UiState, link: SubagentChildLink) -> bool {
-        let background = link.mode == Some(phi_sdk::agent_manager::DelegationMode::Background)
-            || foreground_wait_released(state, &link);
+        if link.admission == phi_sdk::agents::SubagentAdmission::Pending {
+            return false;
+        }
         let Some(run) = self
             .runs
             .iter_mut()
             .find(|run| run.link.child_agent_id == link.child_agent_id)
         else {
-            if link.admission == phi_sdk::agents::SubagentAdmission::Pending {
-                return false;
+            let run = SubagentRun::new(state, link);
+            if run.block.is_none() {
+                notify_child_status(state, &run.link);
             }
-            let block = if background {
-                notify_child_status(state, &link);
-                None
-            } else {
-                Some(state.conversation.project_subagent_container(
-                    link.parent_tool_call_id.as_deref(),
-                    format_agent_title(&link.display_name()),
-                ))
-            };
-            self.runs.push(SubagentRun {
-                link,
-                block,
-                revision: None,
-                headers_requested: false,
-                detail: None,
-                detail_pending: false,
-                compact_enabled: None,
-            });
-            project_status(state, self.runs.last().unwrap());
+            self.runs.push(run);
             return true;
         };
+        let background = link.mode == Some(phi_sdk::agent_manager::DelegationMode::Background)
+            || foreground_wait_released(state, &link);
         let detached = if background && let Some(block) = run.block.take() {
             state.conversation.remove_subagent_trace(block);
             run.revision = None;
@@ -251,10 +272,11 @@ impl SubagentProjection {
         true
     }
 
-    fn reset_projection(&mut self, state: &UiState) {
+    fn restore_projection(&mut self, state: &mut UiState) {
         if !self.runs.is_empty() && state.subagent_views.is_empty() {
-            self.runs.clear();
-            self.selected = None;
+            for run in &mut self.runs {
+                run.restore_summary(state);
+            }
             self.changes = None;
         }
     }
@@ -608,6 +630,13 @@ fn notify_child_status(state: &mut UiState, link: &SubagentChildLink) {
     );
 }
 
+fn project_summary_block(state: &mut UiState, link: &SubagentChildLink) -> BlockId {
+    state.conversation.project_subagent_container(
+        link.parent_tool_call_id.as_deref(),
+        format_agent_title(&link.display_name()),
+    )
+}
+
 fn project_status(state: &mut UiState, run: &SubagentRun) {
     let (block_status, suffix) = outcome_status(&run.link.outcome);
     let view = SubagentView::from(&run.link);
@@ -715,7 +744,7 @@ mod tests {
             parent_tool_call_id: Some("agent-call".into()),
             admission: phi_sdk::agents::SubagentAdmission::Accepted,
             outcome: SubagentOutcome::Running,
-            mode: None,
+            mode: Some(phi_sdk::agent_manager::DelegationMode::Foreground),
         };
         (link, child)
     }
@@ -1061,7 +1090,7 @@ mod tests {
         let (mut link, child) = child_fixture(&parent);
         link.child_agent_id = child.id.to_string();
         link.parent_tool_call_id = Some("workflow-call".into());
-        parent.children.push((&link).into());
+        parent.children.push((&link).try_into().unwrap());
         let run_id: phi_sdk::workflow::WorkflowRunId =
             uuid::Uuid::new_v4().to_string().parse().unwrap();
         parent.workflow_run_ids.push(run_id);
@@ -1176,7 +1205,7 @@ mod tests {
             let (mut link, _) = child_fixture(&parent);
             link.child_agent_id = id.into();
             link.parent_tool_call_id = Some("workflow-call".into());
-            parent.children.push((&link).into());
+            parent.children.push((&link).try_into().unwrap());
         }
         let mut state = UiState::default();
         state.rebuild_history(&parent);
@@ -1195,12 +1224,185 @@ mod tests {
     }
 
     #[test]
+    fn recovery_does_not_repeat_child_notifications() {
+        let mut parent =
+            crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
+        let (mut link, _) = child_fixture(&parent);
+        link.mode = Some(phi_sdk::agent_manager::DelegationMode::Background);
+        parent.children.push((&link).try_into().unwrap());
+        let mut projection = SubagentProjection::default();
+        let mut state = UiState::default();
+        projection.reset_for(&AgentInstanceId::new(parent.id.as_str()));
+        projection.project_summary(&mut state, link.clone());
+
+        for outcome in [
+            SubagentOutcome::Running,
+            SubagentOutcome::Finished {
+                result: "done".into(),
+                is_error: false,
+            },
+        ] {
+            link.outcome = outcome;
+            projection.project_summary(&mut state, link.clone());
+            let notice_ids: Vec<_> = state
+                .conversation
+                .blocks
+                .iter()
+                .map(|block| block.id)
+                .collect();
+            state.recover_history(&parent);
+            projection.restore_summaries(&mut state, &parent);
+            assert_eq!(projection.runs[0].link, link);
+            assert_eq!(state.subagent_views, [SubagentView::from(&link)]);
+            assert!(!projection.project_summary(&mut state, link.clone()));
+            assert_eq!(
+                state
+                    .conversation
+                    .blocks
+                    .iter()
+                    .map(|block| block.id)
+                    .collect::<Vec<_>>(),
+                notice_ids
+            );
+        }
+        assert_eq!(state.conversation.blocks.len(), 2);
+
+        let mut resumed = UiState::default();
+        projection.restore_summaries(&mut resumed, &parent);
+        assert!(resumed.conversation.blocks.is_empty());
+        assert_eq!(resumed.subagent_views, [SubagentView::from(&link)]);
+    }
+
+    #[test]
+    fn recovery_preserves_selected_child_observation_and_detail() {
+        let mut parent =
+            crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
+        let (link, mut child) = child_fixture(&parent);
+        append_child_activity(&mut child);
+        parent.children.push((&link).try_into().unwrap());
+        let mut projection = SubagentProjection::default();
+        let mut state = UiState::default();
+        projection.reset_for(&AgentInstanceId::new(parent.id.as_str()));
+        projection.selected = Some(link.child_agent_id.clone());
+        projection.project_view(
+            &mut state,
+            link.clone(),
+            crate::runtime::SubagentView {
+                session: child,
+                compact_enabled: Some(true),
+                live_run: None,
+            },
+        );
+        let original_block = projection.runs[0].block.unwrap();
+        let detail_source = projection.runs[0]
+            .detail
+            .as_ref()
+            .unwrap()
+            .1
+            .source()
+            .clone();
+
+        state.recover_history(&parent);
+        projection.restore_summaries(&mut state, &parent);
+
+        assert_eq!(projection.runs[0].link, link);
+        assert_eq!(
+            projection.active_subagent(),
+            Some(link.child_agent_id.as_str())
+        );
+        assert_eq!(projection.runs[0].compact_enabled, Some(true));
+        assert_eq!(
+            projection.runs[0].detail.as_ref().unwrap().1.source(),
+            &detail_source
+        );
+        assert_ne!(projection.runs[0].block, Some(original_block));
+        assert_eq!(state.subagent_views, [SubagentView::from(&link)]);
+        assert!(!projection.project_summary(&mut state, link));
+        assert!(
+            state
+                .conversation
+                .blocks
+                .iter()
+                .all(|block| !block.local_notification)
+        );
+    }
+
+    #[test]
+    fn changing_parent_resets_child_observations() {
+        let parent = crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
+        let (mut link, _) = child_fixture(&parent);
+        link.mode = Some(phi_sdk::agent_manager::DelegationMode::Background);
+        let mut projection = SubagentProjection::default();
+        let mut state = UiState::default();
+        projection.reset_for(&AgentInstanceId::new(parent.id.as_str()));
+        projection.project_summary(&mut state, link.clone());
+        projection.selected = Some(link.child_agent_id.clone());
+
+        let mut replacement =
+            crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
+        link.outcome = SubagentOutcome::Finished {
+            result: "done".into(),
+            is_error: false,
+        };
+        replacement.children.push((&link).try_into().unwrap());
+        state.rebuild_history(&replacement);
+        projection.restore_summaries(&mut state, &replacement);
+
+        assert_eq!(projection.active_subagent(), None);
+        assert_eq!(projection.runs.len(), 1);
+        assert_eq!(
+            projection.runs[0].link,
+            SubagentChildLink::from(&replacement.children[0])
+        );
+        assert!(
+            state
+                .conversation
+                .blocks
+                .iter()
+                .all(|block| !block.local_notification)
+        );
+    }
+
+    #[test]
+    fn history_round_trip_preserves_delegation_presentation() {
+        use phi_sdk::agent_manager::DelegationMode;
+
+        for mode in [DelegationMode::Foreground, DelegationMode::Background] {
+            let mut parent =
+                crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
+            let (mut link, _) = child_fixture(&parent);
+            link.mode = Some(mode);
+            parent.children.push((&link).try_into().unwrap());
+            let saved = serde_json::to_value(&parent).unwrap();
+            let restored: Session = serde_json::from_value(saved).unwrap();
+            let mut projection = SubagentProjection::default();
+            let mut state = UiState::default();
+            projection.restore_summaries(&mut state, &restored);
+
+            assert_eq!(state.subagent_views[0].mode, Some(mode));
+            assert_eq!(
+                state.conversation.blocks.len(),
+                usize::from(mode == DelegationMode::Foreground)
+            );
+            assert!(
+                state
+                    .conversation
+                    .blocks
+                    .iter()
+                    .all(|block| block.agent_container)
+            );
+            projection.restore_summaries(&mut state, &restored);
+            assert_eq!(projection.runs.len(), 1);
+        }
+    }
+
+    #[test]
     fn historical_agent_restoration_precedes_resume_notice() {
         let mut parent =
             crate::session::new("local", "test", 1_000, &std::env::current_dir().unwrap());
         let (mut link, _) = child_fixture(&parent);
         link.parent_tool_call_id = None;
-        parent.children.push((&link).into());
+        parent.children.push((&link).try_into().unwrap());
         let mut state = UiState::default();
         state.notify(NotifyKind::Info, "resumed session");
         let mut projection = SubagentProjection::default();
@@ -1234,7 +1436,7 @@ mod tests {
                 details: None,
             },
         });
-        parent.children.push((&link).into());
+        parent.children.push((&link).try_into().unwrap());
         let mut manager = SubagentProjection::default();
         let mut state = UiState::default();
         manager.restore_summaries(&mut state, &parent);
@@ -1444,7 +1646,7 @@ mod tests {
         reattached_state.rebuild_history(&parent);
         let replayed_tool = reattached_state.conversation.blocks[0].id;
         let continuation = reattached_state.conversation.blocks[1].id;
-        parent.children.push((&link).into());
+        parent.children.push((&link).try_into().unwrap());
         reattached.restore_summaries(&mut reattached_state, &parent);
         assert_eq!(reattached.runs[0].link.display_name(), "security (probe)");
         assert_eq!(reattached_state.conversation.blocks.len(), 3);
@@ -1586,7 +1788,7 @@ mod tests {
                         .any(|message| message["role"] == "tool")
                 {
                     (
-                        json!({"tool_calls":[{"index":0,"id":"agent-call","type":"function","function":{"name":"Agent","arguments":json!({"role":"probe","mode":mode,"prompt":"first work"}).to_string()}}]}),
+                        json!({"tool_calls":[{"index":0,"id":"agent-call","type":"function","function":{"name":"Agent","arguments":json!({"action":"create","role":"probe","mode":mode,"prompt":"first work"}).to_string()}}]}),
                         "tool_calls",
                     )
                 } else {
@@ -1724,6 +1926,7 @@ mod tests {
                 .unwrap();
             creation
         };
+        assert_eq!(parent.session().await.children[0].mode, creation.mode());
         let child = runtime.sessions.get(creation.instance_id()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while child.instance().snapshot().pending_interactions.is_empty() {

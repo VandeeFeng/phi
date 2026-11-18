@@ -58,12 +58,31 @@ use components::permission::{answer_permission, drain_permission_requests};
 use components::picker::switch::{save_switches, set_switch_alias};
 use controller::InteractiveController;
 use diagnostics::report_resource_diagnostics;
-#[cfg(test)]
-use phi_tui::KeyInput;
-use render::render_current_target;
+use phi_tui::{KeyInput, poll_key_input_with_timeout};
+use render::{render_current_target, render_frame};
 use state::{UiState, state_from_session};
 
 const SAVE_STATUS_INTERVAL: Duration = Duration::from_millis(100);
+const SHUTDOWN_HOOK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const INTERRUPTED_EXIT_CODE: i32 = 130;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ShutdownState {
+    #[default]
+    Waiting,
+    HooksWarned,
+    ForceExit,
+}
+
+impl ShutdownState {
+    fn advance(self, running_hooks: usize, key: KeyInput) -> Self {
+        match self {
+            Self::Waiting if running_hooks > 0 => Self::HooksWarned,
+            Self::HooksWarned if key == KeyInput::Ctrl('c') => Self::ForceExit,
+            _ => self,
+        }
+    }
+}
 
 #[derive(Default)]
 struct SaveStatus {
@@ -172,6 +191,10 @@ async fn run(
     let mut pending_interaction: Option<InteractionEnvelope> = None;
     let mut interaction_owner = agent_instance.clone();
     let mut renderer = TuiRenderer::default();
+    components
+        .models
+        .refresh_completions(&agent_instance, &mut state, session)
+        .await;
     components.models.start_updates(&agent_instance);
     let mut mcp_actions = mcp::PanelActions::default();
 
@@ -244,6 +267,10 @@ async fn run(
         needs_render |= save_status.poll(&agent_instance, &mut state).await;
         if let Some(declarations) = state.recovered_declarations.take() {
             controller::install_runtime_declarations(&mut capabilities, &mut state, declarations);
+            components
+                .models
+                .refresh_completions(&agent_instance, &mut state, session)
+                .await;
             {
                 mcp::refresh_panel(&mut state, &agent_instance).await;
                 mcp::refresh_tool_display_projection(&mut state, &agent_instance).await;
@@ -569,9 +596,7 @@ async fn run(
                 needs_render = true;
             }
             action @ (UiAction::SetSwitchAlias { .. }
-            | UiAction::SaveSwitchConfig
             | UiAction::CycleSwitchField { .. }
-            | UiAction::ApplySwitchConfig(_)
             | UiAction::DeletePick(_)) => {
                 interactive_controller!().handle_picker_action(action).await;
                 needs_render = true;
@@ -676,32 +701,57 @@ async fn run(
     }
 
     drop(mcp_actions);
-    let input_cleanup = terminal_guard.stop_input();
-    if let Some(sessions) = &owned_sessions
-        && let Ok(stopped) = sessions
-            .stop(
-                agent_instance.id(),
-                phi_sdk::lifecycle::SessionEndReason::Quit,
-            )
-            .await
-    {
-        *session = stopped;
+    if let Some(sessions) = &owned_sessions {
+        let stopping = sessions.stop(
+            agent_instance.id(),
+            phi_sdk::lifecycle::SessionEndReason::Quit,
+        );
+        tokio::pin!(stopping);
+        let mut shutdown = ShutdownState::default();
+        loop {
+            let running_hooks = sessions.running_hook_count()?;
+            let key = poll_key_input_with_timeout(Duration::ZERO)?;
+            let next = shutdown.advance(running_hooks, key);
+            if next != shutdown {
+                match next {
+                    ShutdownState::HooksWarned => {
+                        state.notify(
+                            NotifyKind::Warning,
+                            format!(
+                                "Hooks are still running ({running_hooks}). Press Ctrl+C again to force exit; unfinished work may be lost."
+                            ),
+                        );
+                        subagents.switch_to_main();
+                        render_frame(&mut renderer, &mut subagents, &mut state, session)?;
+                    }
+                    ShutdownState::ForceExit => {
+                        let _ = renderer.finish();
+                        drop(terminal_guard);
+                        std::process::exit(INTERRUPTED_EXIT_CODE);
+                    }
+                    ShutdownState::Waiting => {}
+                }
+                shutdown = next;
+            }
+            tokio::select! {
+                stopped = &mut stopping => {
+                    if let Ok(stopped) = stopped {
+                        *session = stopped;
+                    }
+                    break;
+                }
+                _ = tokio::time::sleep(SHUTDOWN_HOOK_POLL_INTERVAL) => {}
+            }
+        }
     }
     if let Some(sessions) = &owned_sessions
         && agent::project_session_notices(&mut state, sessions.take_notices()?, agent_instance.id())
     {
         subagents.switch_to_main();
-        render_current_target(
-            &mut renderer,
-            &mut subagents,
-            &mut state,
-            session,
-            &agent_instance,
-        )
-        .await?;
+        render_frame(&mut renderer, &mut subagents, &mut state, session)?;
     }
     renderer.finish()?;
-    input_cleanup?;
+    terminal_guard.stop_input()?;
     Ok(())
 }
 
@@ -1043,6 +1093,23 @@ pub(crate) async fn verify_gateway_commands(mut attachment: AgentAttachment) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_warns_once_then_ctrl_c_forces_exit() {
+        let waiting = ShutdownState::default();
+        assert_eq!(waiting.advance(0, KeyInput::None), waiting);
+        assert_eq!(waiting.advance(0, KeyInput::Ctrl('c')), waiting);
+        let warned = waiting.advance(2, KeyInput::None);
+        assert_eq!(warned, ShutdownState::HooksWarned);
+        for key in [KeyInput::None, KeyInput::Resize, KeyInput::Char('q')] {
+            assert_eq!(warned.advance(2, key), warned);
+        }
+        assert_eq!(warned.advance(0, KeyInput::None), warned);
+        assert_eq!(
+            warned.advance(2, KeyInput::Ctrl('c')),
+            ShutdownState::ForceExit
+        );
+    }
 
     #[test]
     fn materializes_branch_change_with_unchanged_entry_ids() {
@@ -1482,7 +1549,7 @@ mod tests {
             state::PickerKind::SwitchSelect
         ));
         Box::pin(controller.select_picker_value("switch:project".into())).await;
-        assert_eq!(controller.session.current_switch, "project");
+        assert_eq!(controller.session.current_switch, "default");
         assert_eq!(controller.session.model, "test");
         assert_eq!(
             picker_draft
@@ -1493,6 +1560,14 @@ mod tests {
                 .as_deref(),
             Some("edited")
         );
+        assert_eq!(controller.state.editor.text(), "selection draft");
+        assert_configuration_notice(controller.state, NotifyKind::Error, "local/edited");
+        controller
+            .select_picker_value("switch:model:project:model:local:test".into())
+            .await;
+        Box::pin(controller.select_picker_value("switch:project".into())).await;
+        assert_eq!(controller.session.current_switch, "project");
+        assert_eq!(controller.session.model, "test");
         assert_eq!(controller.state.editor.text(), "");
         let accepted = agent.current_runtime_view().await;
         assert_eq!(
@@ -1526,14 +1601,24 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::create_dir(path).unwrap();
         controller.state.editor.set_text("failed save draft");
-        Box::pin(controller.select_picker_value("switch:project".into())).await;
-        assert_eq!(controller.state.editor.text(), "");
+        controller
+            .handle_picker_action(UiAction::CycleSwitchField {
+                value: "switch:set:project:thinking".into(),
+                direction: 1,
+            })
+            .await;
+        assert_eq!(controller.state.editor.text(), "failed save draft");
         assert_eq!(controller.session.current_switch, "project");
         let accepted = agent.current_runtime_view().await;
         assert_ne!(accepted.declarations.generation_id, generation);
+        assert_eq!(
+            accepted.declarations.capabilities.thinking_level.as_deref(),
+            Some("minimal"),
+            "settings write failure must not roll back accepted execution parameters"
+        );
         let generation = accepted.declarations.generation_id;
         std::fs::remove_dir(path).unwrap();
-        std::fs::write(path, saved).unwrap();
+        std::fs::write(path, &saved).unwrap();
         std::fs::remove_file(project).unwrap();
         controller.state.editor.set_text("preserved draft");
         Box::pin(controller.select_picker_value("switch:project".into())).await;
@@ -1548,6 +1633,54 @@ mod tests {
                 .generation_id,
             generation
         );
+        let catalog_options = crate::config::settings::model_catalog_options(true);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("models.json")).unwrap()).unwrap();
+        let descriptor = catalog["providers"]["local"].clone();
+        use phi_sdk::providers::ProviderApi;
+        for (provider, api) in [
+            ("anthropic", ProviderApi::AnthropicMessages),
+            ("deepseek", ProviderApi::DeepSeekChat),
+            ("google", ProviderApi::GeminiGenerateContent),
+            ("openai", ProviderApi::OpenAiResponses),
+            ("openai-codex", ProviderApi::OpenAiCodexResponses),
+            ("openrouter", ProviderApi::OpenAiCompletions),
+        ] {
+            catalog["providers"][provider] = descriptor.clone();
+            catalog["providers"][provider]["api"] = serde_json::to_value(api).unwrap();
+        }
+        std::fs::write(
+            &catalog_options.user_paths[0],
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        let reloaded = r#"{"switches":[{"name":"project","provider":"local","model":"test","alias":"reloaded"}],"hooks":{"enabled":false}}"#;
+        std::fs::write(project, reloaded).unwrap();
+        controller.reload_resources().await;
+        assert_configuration_notice(controller.state, NotifyKind::Info, "Resources reloaded");
+        Box::pin(controller.select_picker_value("switch:project".into())).await;
+        let accepted = agent.current_runtime_view().await;
+        let switch_command = accepted
+            .declarations
+            .commands
+            .iter()
+            .find(|command| command.name == "switch")
+            .unwrap();
+        let choice = switch_command
+            .arguments
+            .as_ref()
+            .unwrap()
+            .values
+            .iter()
+            .find(|argument| argument.value == "project")
+            .unwrap();
+        assert_eq!(
+            choice.alias.as_deref(),
+            Some("reloaded"),
+            "ordinary selection must retain reloaded definitions"
+        );
+        assert_eq!(std::fs::read_to_string(project).unwrap(), reloaded);
+        assert_eq!(std::fs::read(path).unwrap(), saved);
         test_runtime
             .sessions
             .stop(
@@ -1681,7 +1814,7 @@ mod tests {
         else {
             panic!("expected a configuration notification");
         };
-        assert_eq!(notice.kind, kind);
+        assert_eq!(notice.kind, kind, "{}", notice.message);
         assert!(notice.message.contains(message), "{}", notice.message);
     }
 

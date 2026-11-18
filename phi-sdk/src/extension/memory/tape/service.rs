@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use compact_str::CompactString;
@@ -63,19 +62,15 @@ impl TapeService {
         let tape_base_path = tape_base_path.into();
         let working_dir = working_dir.into();
         let session_id = session_id.into();
-        let checkpoint_store =
-            GitCheckpointStore::discover(Path::new(&working_dir), session_id.as_str());
+        let workspace = crate::utils::workspace::WorkspaceMeta::discover(&working_dir, None)?;
+        let checkpoint_store = GitCheckpointStore::discover(&workspace, session_id.as_str());
         let anchor_store = Arc::new(AnchorStore::new(tape_base_path, project_name)?);
         Ok(Self {
             anchor_store,
-            workspace_id: crate::utils::workspace::git_worktree_id(&working_dir)
+            workspace_id: workspace
+                .worktree_id()
                 .map(|id| format!("git:{id}"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "directory:{}",
-                        crate::utils::workspace::get_project_meta(&working_dir).root
-                    )
-                }),
+                .unwrap_or_else(|| format!("directory:{}", workspace.root.display())),
             session_id,
             working_dir,
             checkpoint_store,
@@ -572,7 +567,7 @@ mod tests {
     fn duplicate_anchor_identity_is_rejected_in_all_storage_modes() {
         let directory = std::path::PathBuf::from("/tmp")
             .join(format!("phi-anchor-identity-{}", uuid::Uuid::new_v4()));
-        let disk = TapeService::create(&directory, "test", "session", "").unwrap();
+        let disk = TapeService::new(Arc::new(AnchorStore::new(&directory, "test").unwrap()));
         for service in [TapeService::default(), disk] {
             let anchor = TapeAnchor::new("checkpoint", TapeAnchorType::Normal);
             service
@@ -595,8 +590,8 @@ mod tests {
     fn persisted_delete_and_reset_are_visible_to_other_instances() {
         let directory = std::path::PathBuf::from("/tmp")
             .join(format!("phi-anchor-service-{}", uuid::Uuid::new_v4()));
-        let service = TapeService::create(&directory, "test", "session", "").unwrap();
-        let observer = TapeService::create(&directory, "test", "session", "").unwrap();
+        let service = TapeService::new(Arc::new(AnchorStore::new(&directory, "test").unwrap()));
+        let observer = TapeService::new(Arc::new(AnchorStore::new(&directory, "test").unwrap()));
         let first = service
             .create_anchor_without_transcript("first", TapeAnchorType::Normal, None)
             .unwrap();

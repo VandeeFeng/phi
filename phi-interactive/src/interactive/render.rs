@@ -22,6 +22,15 @@ pub(super) async fn render_current_target(
     if state.features.extensions {
         let _ = attachment.extension_ui_rendered().await;
     }
+    render_frame(renderer, subagents, state, session)
+}
+
+pub(super) fn render_frame(
+    renderer: &mut phi_tui::TuiRenderer,
+    subagents: &mut SubagentProjection,
+    state: &mut UiState,
+    session: &Session,
+) -> anyhow::Result<()> {
     let area = state.runtime.render_area()?;
     let theme = Theme::default();
     let mut target = subagents.render_target(state, session);

@@ -193,7 +193,9 @@ async fn main() -> anyhow::Result<()> {
             .hook_workspace_trust(&working_directory)?
             .is_none()
     {
-        let root = phi_sdk::workspace::project_scope_root(&working_directory).canonicalize()?;
+        let root = phi_sdk::workspace::WorkspaceMeta::discover(&working_directory, None)?
+            .root
+            .canonicalize()?;
         let decision = interactive::confirm_hook_workspace(&root)?.ok_or_else(|| {
             anyhow::anyhow!("workspace Hook trust cancelled for {}", root.display())
         })?;

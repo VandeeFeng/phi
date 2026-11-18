@@ -120,9 +120,10 @@ mod tests {
                 parent_tool_call_id: None,
                 admission: phi_sdk::agents::SubagentAdmission::Accepted,
                 outcome: crate::session::SubagentOutcome::Interrupted,
-                mode: None,
+                mode: Some(phi_sdk::agent_manager::DelegationMode::Foreground),
             })
-                .into(),
+                .try_into()
+                .unwrap(),
         );
         let workflows = crate::runtime::preparation::SessionWorkflows::new(
             runtime.sessions.clone(),

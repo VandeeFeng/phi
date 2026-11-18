@@ -8,7 +8,7 @@ use crate::extension::memory::tape::types::{TapeAnchorMode, TapeConfig, TapeKeyw
 use crate::extension::memory::types::MemorySettings;
 use crate::extension::memory::utils::format_time_suffix;
 use crate::permission::runtime::PermissionRuntime;
-use crate::utils::workspace::{ProjectMeta, get_project_meta};
+use crate::utils::workspace::WorkspaceMeta;
 
 const MIN_KEYWORD_PROMPT_LENGTH: usize = 10;
 const MAX_KEYWORD_PROMPT_LENGTH: usize = 300;
@@ -32,7 +32,7 @@ pub enum TapeGateReason {
 pub struct TapeGateResult {
     pub enabled: bool,
     pub reason: TapeGateReason,
-    pub project: Option<ProjectMeta>,
+    pub workspace: Option<WorkspaceMeta>,
     pub matched_exclude_dir: Option<String>,
 }
 
@@ -222,15 +222,15 @@ pub fn resolve_tape_anchor_trigger(
     }
 }
 
-pub fn resolve_tape_gate(cwd: &str, tape: Option<&TapeConfig>) -> TapeGateResult {
+pub fn resolve_tape_gate(cwd: &str, tape: Option<&TapeConfig>) -> anyhow::Result<TapeGateResult> {
     let absolute_cwd = absolutize(Path::new(cwd));
     let Some(tape) = tape.filter(|tape| tape.enabled != Some(false)) else {
-        return TapeGateResult {
+        return Ok(TapeGateResult {
             enabled: false,
             reason: TapeGateReason::Disabled,
-            project: None,
+            workspace: None,
             matched_exclude_dir: None,
-        };
+        });
     };
 
     let canonical_cwd = absolute_cwd.canonicalize().ok();
@@ -243,35 +243,35 @@ pub fn resolve_tape_gate(cwd: &str, tape: Option<&TapeConfig>) -> TapeGateResult
             _ => false,
         };
         if is_excluded {
-            return TapeGateResult {
+            return Ok(TapeGateResult {
                 enabled: false,
                 reason: TapeGateReason::ExcludedDir,
-                project: None,
+                workspace: None,
                 matched_exclude_dir: Some(
                     absolutize(Path::new(excluded_dir))
                         .to_string_lossy()
                         .to_string(),
                 ),
-            };
+            });
         }
     }
 
-    let project = get_project_meta(&absolute_cwd);
-    if tape.only_git.unwrap_or(true) && project.git_root.is_none() {
-        return TapeGateResult {
+    let workspace = WorkspaceMeta::discover(&absolute_cwd, None)?;
+    if tape.only_git.unwrap_or(true) && workspace.git_dir().is_none() {
+        return Ok(TapeGateResult {
             enabled: false,
             reason: TapeGateReason::MissingGit,
-            project: None,
+            workspace: None,
             matched_exclude_dir: None,
-        };
+        });
     }
 
-    TapeGateResult {
+    Ok(TapeGateResult {
         enabled: true,
         reason: TapeGateReason::Enabled,
-        project: Some(project),
+        workspace: Some(workspace),
         matched_exclude_dir: None,
-    }
+    })
 }
 
 pub fn normalize_tape_keywords(config: Option<&TapeKeywordConfig>) -> TapeKeywordConfig {

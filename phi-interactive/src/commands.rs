@@ -44,10 +44,11 @@ impl SlashCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelCommand {
     Select,
     Update,
+    Set(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,7 +265,7 @@ const BUILTIN_COMMANDS: &[CommandSpec] = &[
         "model",
         "choose or update the active model",
         CommandSyntax::Arguments {
-            usage: MODEL_UPDATE,
+            usage: "[<provider/model> | update]",
             values: |_| vec![argument(MODEL_UPDATE, None)],
             parse: parse_model,
         },
@@ -300,7 +301,7 @@ const BUILTIN_COMMANDS: &[CommandSpec] = &[
         enabled: CommandEnabled::Workflow,
         ..command(
             WORKFLOW,
-            "prefer Workflow for a task",
+            "request Workflow for a complex, parallel or multistage task",
             CommandSyntax::Arguments {
                 usage: "<task>",
                 values: no_values,
@@ -437,11 +438,20 @@ fn parse_model(args: &str) -> Result<Option<BuiltinCommand>, CommandError> {
     let command = match args {
         "" => ModelCommand::Select,
         MODEL_UPDATE => ModelCommand::Update,
-        argument => {
-            return Err(CommandError::msg(format!(
-                "unknown model command: {argument}"
-            )));
-        }
+        argument => match argument.split_once('/') {
+            Some((provider, model))
+                if !provider.is_empty()
+                    && !model.is_empty()
+                    && !argument.contains(char::is_whitespace) =>
+            {
+                ModelCommand::Set(format!("model:{provider}:{model}"))
+            }
+            _ => {
+                return Err(CommandError::msg(format!(
+                    "unknown model command: {argument}"
+                )));
+            }
+        },
     };
     Ok(Some(BuiltinCommand::Model(command)))
 }
@@ -641,6 +651,28 @@ mod tests {
             "/skill:review inspect",
         ] {
             assert!(registry.resolve(input).unwrap().is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn model_selection_preserves_provider_and_nested_model_id() {
+        let registry = CommandRegistry::new(&[]);
+        for model in ["sonnet", "vendor/sonnet"] {
+            assert_eq!(
+                registry.resolve(&format!("/model local/{model}")).unwrap(),
+                Some(CommandInvocation::Builtin {
+                    command: BuiltinCommand::Model(ModelCommand::Set(format!(
+                        "model:local:{model}"
+                    )))
+                })
+            );
+        }
+        for input in [
+            "/model /sonnet",
+            "/model local/",
+            "/model local/sonnet extra",
+        ] {
+            assert!(registry.resolve(input).is_err(), "{input}");
         }
     }
 

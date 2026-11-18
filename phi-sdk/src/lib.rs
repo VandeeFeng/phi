@@ -51,9 +51,7 @@ pub mod workspace {
         builtin_skills_dir, encode_working_dir_key, expand_home_path, phi_config_dir,
         phi_session_root, session_scope_dir,
     };
-    pub use crate::utils::workspace::{
-        ProjectMeta, get_project_meta, git_root, git_worktree_id, project_scope_root,
-    };
+    pub use crate::utils::workspace::WorkspaceMeta;
 }
 
 pub mod agent_manager {

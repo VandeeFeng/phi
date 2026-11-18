@@ -340,6 +340,8 @@ impl ChatGPTClient {
         ChatGPTModel {
             store: self.store.clone(),
             model: model.into(),
+            #[cfg(test)]
+            base_url: None,
         }
     }
 }
@@ -348,6 +350,8 @@ impl ChatGPTClient {
 pub(crate) struct ChatGPTModel {
     store: AuthStore,
     model: String,
+    #[cfg(test)]
+    base_url: Option<String>,
 }
 
 impl ChatGPTModel {
@@ -366,13 +370,18 @@ impl ChatGPTModel {
                 .map(ToOwned::to_owned),
         };
         // Authentication has settled under the store lock; requests cannot refresh again.
-        let client = chatgpt::Client::builder()
+        let builder = chatgpt::Client::builder()
             .api_key(auth)
             .http_client(super::transport::ProviderTransport::default())
             .originator("phi")
-            .user_agent(format!("phi/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(auth_error)?;
+            .user_agent(format!("phi/{}", env!("CARGO_PKG_VERSION")));
+        #[cfg(test)]
+        let builder = if let Some(base_url) = &self.base_url {
+            builder.base_url(base_url)
+        } else {
+            builder
+        };
+        let client = builder.build().map_err(auth_error)?;
         Ok(client.completion_model(self.model.clone()))
     }
 }
@@ -395,16 +404,24 @@ pub(crate) fn is_authorization_error(error: &CompletionError) -> bool {
 impl CompletionModel for ChatGPTModel {
     async fn completion(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<CompletionResponse, CompletionError> {
-        self.authorized_model().await?.completion(request).await
+        self.authorized_model()
+            .await?
+            .with_tools(super::backend::take_responses_tools(&mut request))
+            .completion(request)
+            .await
     }
 
     async fn stream(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse, CompletionError> {
-        self.authorized_model().await?.stream(request).await
+        self.authorized_model()
+            .await?
+            .with_tools(super::backend::take_responses_tools(&mut request))
+            .stream(request)
+            .await
     }
 }
 
@@ -676,6 +693,111 @@ mod tests {
             })
             .await;
         assert_eq!(scope.exceeded_status(), None);
+    }
+
+    #[tokio::test]
+    async fn codex_responses_sends_explicit_agent_strict_false() {
+        use crate::agent::{custom::AgentCatalog, tools::AgentTool};
+        use futures::StreamExt;
+        use rig::{completion::ToolDefinition, tool::Tool};
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let fixture = Fixture::new();
+        fixture.seed();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = ChatGPTClient {
+            store: fixture.store.clone(),
+        };
+        let mut model = client.completion_model("test-codex");
+        model.base_url = Some(format!(
+            "http://{}/backend-api/codex",
+            listener.local_addr().unwrap()
+        ));
+
+        let agent = AgentTool::new(
+            tokio::sync::mpsc::unbounded_channel().0,
+            &AgentCatalog::new(Vec::new()),
+            None,
+        );
+        let parameters = agent.parameters();
+        let request = model
+            .completion_request("Inspect.")
+            .tools(vec![
+                ToolDefinition {
+                    name: AgentTool::NAME.into(),
+                    description: agent.description(),
+                    parameters: parameters.clone(),
+                },
+                ToolDefinition {
+                    name: "Task".into(),
+                    description: "Track work".into(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+            ])
+            .build();
+
+        for streaming in [false, true] {
+            let capture = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "POST /backend-api/codex/responses HTTP/1.1\r\n");
+                let mut headers = std::collections::HashMap::new();
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+                }
+                assert_eq!(headers["authorization"], "Bearer original");
+                assert_eq!(headers["chatgpt-account-id"], "account");
+                let mut body = vec![0; headers["content-length"].parse().unwrap()];
+                stream.read_exact(&mut body).await.unwrap();
+                stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Value>(&body).unwrap()
+            };
+            let run = async {
+                if streaming {
+                    // Rig opens the HTTP connection only when the stream is polled.
+                    model
+                        .stream(request.clone())
+                        .await
+                        .unwrap()
+                        .next()
+                        .await
+                        .unwrap()
+                        .err()
+                        .unwrap()
+                } else {
+                    model.completion(request.clone()).await.unwrap_err()
+                }
+            };
+            let (error, wire) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(run, capture)
+            })
+            .await
+            .expect("Codex request did not finish against the local mock");
+            assert_eq!(
+                error.provider_response_status().map(|s| s.as_u16()),
+                Some(400)
+            );
+            assert_eq!(wire["model"], "test-codex");
+            let tools = wire["tools"].as_array().unwrap();
+            let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let agent = tool("Agent");
+            assert_eq!(agent.get("strict"), Some(&json!(false)));
+            assert_eq!(agent["parameters"], parameters);
+            assert!(tool("Task").get("strict").is_none());
+        }
     }
 
     #[test]

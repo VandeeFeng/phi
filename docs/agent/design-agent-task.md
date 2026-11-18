@@ -205,7 +205,7 @@ Permission evidence contains the resolved typed owner rather than an unresolved 
 
 ## Connecting Agents to work
 
-The Agent tool creates instances with three separate fields:
+The Agent tool creates instances with `action="create"` and three separate fields:
 
 | Field | Purpose | Example |
 | --- | --- | --- |
@@ -408,7 +408,7 @@ Lead A starts with Teams enabled
 A calls Task(action=create) for security review               returns "1"
 A calls Task(action=create) for performance review            returns "2"
 A calls Task(action=update, task_id="2", add_blocked_by=["1"])
-A creates two Agents:
+A creates two Agents with action=create:
   role="code-reviewer", alias="security",
     prompt="Claim Task 1, review security, report and explicitly complete it."
   role="code-reviewer", alias="performance",
@@ -425,7 +425,7 @@ Finalization closes members and saves their Sessions
   -> remove Team config/inboxes; retain Task records
 ```
 
-Without recorded work, `Agent(role="code-reviewer", prompt="Review auth changes and return findings.")` uses the same independent Agent execution without any Task operation.
+Without recorded work, `Agent(action="create", role="code-reviewer", prompt="Review auth changes and return findings.")` uses the same independent Agent execution without any Task operation.
 
 ## Design references
 

@@ -147,8 +147,10 @@ fn load_agents_from(
         parts.push(format!("# Global AGENTS.md\n{content}"));
     }
     if let Some(cwd) = working_dir {
-        let root = crate::utils::workspace::project_scope_root(&cwd);
-        if let Some((name, content)) = project_instruction(&root) {
+        let workspace = crate::utils::workspace::WorkspaceMeta::discover(&cwd, None).ok();
+        if let Some((name, content)) =
+            workspace.and_then(|workspace| project_instruction(&workspace.root))
+        {
             parts.push(format!("# Project {name}\n{content}"));
         }
     }

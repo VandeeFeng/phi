@@ -63,11 +63,11 @@ Before modifying a crate, read its local `AGENTS.md`:
 
 ## Common commands
 
-```bash
-cargo check --workspace
-cargo test --workspace
-cargo fmt --all
+ALWAYS use `test.sh` for phi tests.
 
+set timeout 600s.
+
+```bash
 ./test.sh full                       # parallel workspace tests and checks
 ./test.sh runtime                    # application runtime regressions
 ./test.sh sdk                        # SDK harness regressions

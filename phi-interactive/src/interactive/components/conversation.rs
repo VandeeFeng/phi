@@ -140,6 +140,7 @@ pub(in crate::interactive) struct ConversationView {
     pub(in crate::interactive) blocks_expanded: Option<bool>,
     pub(in crate::interactive) usage: UsageView,
     run_active: bool,
+    provider_recovery: Option<(phi_sdk::ProviderRecovery, Instant)>,
     // Image segmentation clears the live text block without clearing text observation.
     assistant_visible: bool,
     status_frame: usize,
@@ -168,6 +169,7 @@ impl Default for ConversationView {
             blocks_expanded: None,
             usage: UsageView::default(),
             run_active: false,
+            provider_recovery: None,
             assistant_visible: false,
             status_frame: 0,
             last_status_frame: Instant::now(),
@@ -201,20 +203,11 @@ impl ConversationView {
                 self.push_text_block(BlockRole::Event, message);
             }
             PhiEvent::ProviderRecovery { recovery } => {
-                let action = match recovery.reason {
-                    phi_sdk::RecoveryReason::ProviderRetry => "provider retry",
-                    phi_sdk::RecoveryReason::ContextOverflow => "context overflow recovery",
-                };
-                self.push_text_block(
-                    BlockRole::Event,
-                    format!(
-                        "{action}: {}/{} (attempt {}, delay {}ms)",
-                        recovery.provider, recovery.model, recovery.attempt, recovery.delay_ms,
-                    ),
-                );
+                self.provider_recovery = Some((recovery, Instant::now()));
             }
             PhiEvent::TurnStarted { .. } => self.project_main_run_started(),
             PhiEvent::AssistantStarted { .. } => {
+                self.provider_recovery = None;
                 if self.assistant_visible {
                     self.reset_live_assistant_display();
                 }
@@ -457,6 +450,26 @@ impl ConversationView {
         RunStatusView {
             active: self.run_active_projection(),
             frame: self.status_frame,
+            label: self
+                .provider_recovery
+                .as_ref()
+                .and_then(|(recovery, started)| match recovery.reason {
+                    phi_sdk::RecoveryReason::ContextOverflow => {
+                        Some("Recovering context...".into())
+                    }
+                    phi_sdk::RecoveryReason::ProviderRetry => {
+                        let remaining = std::time::Duration::from_millis(recovery.delay_ms)
+                            .saturating_sub(started.elapsed());
+                        (!remaining.is_zero()).then(|| {
+                            format!(
+                                "Retrying ({}/{}) in {}s... (esc to cancel)",
+                                recovery.attempt,
+                                recovery.max_attempts,
+                                remaining.as_millis().div_ceil(1000),
+                            )
+                        })
+                    }
+                }),
         }
     }
 
@@ -487,11 +500,13 @@ impl ConversationView {
 
     pub(in crate::interactive) fn project_main_run_started(&mut self) {
         self.start_live_run();
+        self.provider_recovery = None;
         self.run_active = true;
     }
 
     pub(in crate::interactive) fn project_main_run_finished(&mut self) {
         self.clear_live_run();
+        self.provider_recovery = None;
         self.run_active = false;
     }
 
@@ -522,6 +537,22 @@ impl ConversationView {
                 let output = text_from_blocks(content).unwrap_or_default();
                 self.project_tool_call_finished(tool_call_id, &output, *is_error, details.as_ref());
             }
+        }
+    }
+
+    pub(in crate::interactive) fn notify_run_cancelled(&mut self) {
+        if let Some((recovery, _)) = &self.provider_recovery
+            && recovery.reason == phi_sdk::RecoveryReason::ProviderRetry
+        {
+            self.notify(
+                NotifyKind::Error,
+                format!(
+                    "Retry failed after {} attempts: Retry cancelled",
+                    recovery.attempt,
+                ),
+            );
+        } else {
+            self.notify_operation_canceled();
         }
     }
 
@@ -1113,15 +1144,91 @@ mod tests {
             recovery: phi_sdk::ProviderRecovery {
                 reason: phi_sdk::RecoveryReason::ProviderRetry,
                 attempt: 1,
-                delay_ms: 100,
+                max_attempts: 3,
+                delay_ms: 309_000,
                 provider: "local".into(),
                 model: "test".into(),
             },
         });
         assert!(view.run_active_projection());
+        assert!(view.blocks.is_empty());
         assert!(
-            matches!(&view.blocks.last().unwrap().block.body, BlockBody::Text(text) if text.contains("provider retry: local/test"))
+            view.run_status_view().render(100)[1]
+                .text
+                .contains("Retrying (1/3) in 309s... (esc to cancel)")
         );
+        view.provider_recovery.as_mut().unwrap().1 =
+            Instant::now() - std::time::Duration::from_secs(310);
+        assert!(
+            view.run_status_view().render(100)[1]
+                .text
+                .contains("Cooking...")
+        );
+        view.project_event(PhiEvent::ProviderRecovery {
+            recovery: phi_sdk::ProviderRecovery {
+                reason: phi_sdk::RecoveryReason::ContextOverflow,
+                attempt: 1,
+                max_attempts: 1,
+                delay_ms: 0,
+                provider: "local".into(),
+                model: "test".into(),
+            },
+        });
+        assert!(view.blocks.is_empty());
+        assert!(
+            view.run_status_view().render(100)[1]
+                .text
+                .contains("Recovering context...")
+        );
+        view.project_event(PhiEvent::AssistantStarted { id: "retry".into() });
+        assert!(
+            view.run_status_view().render(100)[1]
+                .text
+                .contains("Cooking...")
+        );
+        view.project_main_run_finished();
+        assert!(view.run_status_view().render(100).is_empty());
+    }
+
+    #[test]
+    fn cancellation_notice_reflects_recovery() {
+        for reason in [
+            None,
+            Some(phi_sdk::RecoveryReason::ProviderRetry),
+            Some(phi_sdk::RecoveryReason::ContextOverflow),
+        ] {
+            let mut view = ConversationView::default();
+            view.project_main_run_started();
+            if let Some(reason) = reason {
+                view.project_event(PhiEvent::ProviderRecovery {
+                    recovery: phi_sdk::ProviderRecovery {
+                        reason,
+                        attempt: 2,
+                        max_attempts: 3,
+                        delay_ms: 309_000,
+                        provider: "local".into(),
+                        model: "test".into(),
+                    },
+                });
+            }
+            view.notify_run_cancelled();
+            view.project_run_cancelled();
+            assert!(view.run_status_view().render(100).is_empty());
+            assert_eq!(view.blocks.len(), 1);
+            if reason == Some(phi_sdk::RecoveryReason::ProviderRetry) {
+                assert!(matches!(
+                    &view.blocks[0].block.body,
+                    BlockBody::Notify(notice)
+                        if notice.kind == NotifyKind::Error
+                            && notice.message == "Retry failed after 2 attempts: Retry cancelled"
+                ));
+            } else {
+                assert!(matches!(
+                    &view.blocks[0].block.body,
+                    BlockBody::Styled(lines) if lines[0].text == "Operation canceled"
+                ));
+            }
+        }
     }
 
     fn append_child_response(session: &mut Session, content: Vec<ContentBlock>) {

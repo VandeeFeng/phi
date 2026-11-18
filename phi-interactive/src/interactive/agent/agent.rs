@@ -44,8 +44,8 @@ pub(in crate::interactive) async fn drain_agent_events(
                     Ok(transcript) => state.conversation.reconcile_tool_results(&transcript),
                     Err(_) => recover_transcript = true,
                 }
+                state.conversation.notify_run_cancelled();
                 state.project_run_cancelled();
-                state.conversation.notify_operation_canceled();
                 sync_metadata = true;
                 changed = true;
             }
@@ -722,8 +722,8 @@ mod tests {
         state.conversation.project_main_run_started();
         state.conversation.append_live_assistant("stale partial");
         state.conversation.reset_live_assistant();
+        state.conversation.notify_run_cancelled();
         state.project_run_cancelled();
-        state.conversation.notify_operation_canceled();
         let notice_ids = [
             state.conversation.blocks[0].id,
             state.conversation.blocks.last().unwrap().id,

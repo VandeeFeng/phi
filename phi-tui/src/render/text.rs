@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use textwrap::{Options, WordSplitter, wrap as textwrap_wrap};
+use textwrap::{WordSeparator, core::Fragment, wrap_algorithms::wrap_first_fit};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -54,31 +54,84 @@ fn wrap_bounded(
     max_rows: usize,
     retained_rows: RetainedRows,
 ) -> (Vec<String>, usize) {
-    if text.is_empty() {
-        return ((max_rows > 0).then(String::new).into_iter().collect(), 1);
-    }
-    let options = Options::new(width.max(1))
-        .break_words(true)
-        .word_splitter(WordSplitter::NoHyphenation);
+    let width = width.max(1);
     let mut retained = std::collections::VecDeque::new();
     let mut total = 0;
     for source in text.split('\n') {
-        let wrapped = if source.is_empty() {
-            vec![std::borrow::Cow::Borrowed("")]
-        } else {
-            textwrap_wrap(source, &options)
-        };
-        for line in wrapped {
+        let source = source.strip_suffix('\r').unwrap_or(source);
+        for line in wrap_line(source, width) {
             total += 1;
             if retained.len() < max_rows {
-                retained.push_back(line.into_owned());
+                retained.push_back(line.to_owned());
             } else if retained_rows == RetainedRows::Tail && max_rows > 0 {
                 retained.pop_front();
-                retained.push_back(line.into_owned());
+                retained.push_back(line.to_owned());
             }
         }
     }
     (retained.into_iter().collect(), total)
+}
+
+#[derive(Debug)]
+struct WrapFragment<'a> {
+    text: &'a str,
+    whitespace: &'a str,
+}
+
+impl Fragment for WrapFragment<'_> {
+    fn width(&self) -> f64 {
+        display_width(self.text) as f64
+    }
+
+    fn whitespace_width(&self) -> f64 {
+        display_width(self.whitespace) as f64
+    }
+
+    fn penalty_width(&self) -> f64 {
+        0.0
+    }
+}
+
+fn wrap_line(source: &str, width: usize) -> Vec<&str> {
+    if display_width(source) <= width {
+        return vec![source.trim_end_matches(' ')];
+    }
+    let mut fragments = Vec::new();
+    for word in WordSeparator::new().find_words(source) {
+        let mut start = 0;
+        let mut used = 0;
+        // textwrap's forced word breaks count code points rather than graphemes.
+        for (index, grapheme) in word.word.grapheme_indices(true) {
+            let grapheme_width = display_width(grapheme);
+            if used > 0 && used + grapheme_width > width {
+                fragments.push(WrapFragment {
+                    text: &word.word[start..index],
+                    whitespace: "",
+                });
+                start = index;
+                used = 0;
+            }
+            used += grapheme_width;
+        }
+        fragments.push(WrapFragment {
+            text: &word.word[start..],
+            whitespace: word.whitespace,
+        });
+    }
+    let mut offset = 0;
+    wrap_first_fit(&fragments, &[width as f64])
+        .into_iter()
+        .map(|line| {
+            let length = line
+                .iter()
+                .map(|fragment| fragment.text.len() + fragment.whitespace.len())
+                .sum::<usize>();
+            let trailing = line.last().map_or(0, |fragment| fragment.whitespace.len());
+            let text = &source[offset..offset + length - trailing];
+            offset += length;
+            text
+        })
+        .collect()
 }
 
 pub fn display_width(text: &str) -> usize {
@@ -192,6 +245,73 @@ fn pad_in_place(text: &mut String, width: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapping_preserves_graphemes_and_row_budgets() {
+        for unit in ["", "abc", "中文", "e\u{301}", "👩‍💻", "🇨🇳", "👨‍👩‍👧‍👦"]
+        {
+            for repetitions in 1..=4 {
+                let text = unit.repeat(repetitions);
+                let graphemes = text.graphemes(true).collect::<Vec<_>>();
+                let widest = graphemes
+                    .iter()
+                    .map(|text| display_width(text))
+                    .max()
+                    .unwrap_or(0);
+                for width in 0..=8 {
+                    let lines = wrap(&text, width);
+                    assert_eq!(lines.concat(), text);
+                    assert_eq!(
+                        lines
+                            .iter()
+                            .flat_map(|line| line.graphemes(true))
+                            .collect::<Vec<_>>(),
+                        graphemes,
+                        "{text:?}, width {width}",
+                    );
+                    assert!(
+                        lines
+                            .iter()
+                            .all(|line| display_width(line) <= width.max(widest))
+                    );
+                    for budget in [0, 1, 2, usize::MAX] {
+                        assert_eq!(
+                            wrap_tail(&text, width, budget),
+                            (
+                                lines[lines.len().saturating_sub(budget)..].to_vec(),
+                                lines.len()
+                            )
+                        );
+                        assert_eq!(
+                            wrap_head(&text, width, budget),
+                            (lines[..lines.len().min(budget)].to_vec(), lines.len())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_wrapping_matches_lf_with_blank_and_trailing_lines() {
+        let lf = "first paragraph wraps here\n\n中文文档\n";
+        for text in [lf.replace('\n', "\r\n"), lf.replacen('\n', "\r\n", 1)] {
+            for width in [1, 8, 20] {
+                let expected = wrap(lf, width);
+                assert_eq!(wrap(&text, width), expected);
+                for budget in [0, 1, 2, usize::MAX] {
+                    assert_eq!(
+                        wrap_tail(&text, width, budget),
+                        wrap_tail(lf, width, budget)
+                    );
+                    assert_eq!(
+                        wrap_head(&text, width, budget),
+                        wrap_head(lf, width, budget)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn compacts_cwd_and_home_paths() {

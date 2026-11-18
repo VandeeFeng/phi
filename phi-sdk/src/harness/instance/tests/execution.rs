@@ -825,7 +825,7 @@ fn failing_completion(request: &Value) -> Value {
     }
     json!({"id": "completion", "model": request["model"], "choices": [{"delta": {
         "tool_calls": [{"index": 0, "id": "failed_call", "type": "function", "function": {
-            "name": "Agent", "arguments": json!({"role": "missing", "prompt": "task"}).to_string()
+            "name": "Agent", "arguments": json!({"action": "create", "role": "missing", "prompt": "task"}).to_string()
         }}]}, "finish_reason": "tool_calls"}]})
 }
 

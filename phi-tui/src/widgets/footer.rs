@@ -1,6 +1,3 @@
-use std::path::Path;
-use std::process::Command;
-
 use crate::text::{display_width, truncate};
 use crate::{RenderContext, StyledLine, StyledSegment, ThemeColor, Widget};
 
@@ -40,19 +37,6 @@ impl Widget for Footer {
     }
 }
 
-pub fn current_git_branch(path: impl AsRef<Path>) -> Option<String> {
-    let output = Command::new("git")
-        .args(["-C", path.as_ref().to_str()?, "branch", "--show-current"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    clean_git_branch_output(&output.stdout)
-}
-
 pub fn path_with_git_branch(path: &str, branch: Option<&str>) -> String {
     match branch.filter(|branch| !branch.is_empty()) {
         Some(branch) => format!("{path} ({branch})"),
@@ -70,11 +54,6 @@ pub fn model_with_thinking_level(
         Some(level) => format!("{model_text} • {level}"),
         None => model_text,
     }
-}
-
-fn clean_git_branch_output(output: &[u8]) -> Option<String> {
-    let branch = String::from_utf8_lossy(output).trim().to_string();
-    (!branch.is_empty()).then_some(branch)
 }
 
 fn render_line(line: &FooterLine, width: usize) -> StyledLine {

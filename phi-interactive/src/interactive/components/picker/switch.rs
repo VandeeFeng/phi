@@ -18,10 +18,7 @@ impl SwitchFeatures {
         let configuration = match action {
             UiAction::Pick(value) => configuration_value(value),
             UiAction::DeletePick(value) => value.starts_with("switch:delete:"),
-            UiAction::CycleSwitchField { .. }
-            | UiAction::SetSwitchAlias { .. }
-            | UiAction::SaveSwitchConfig
-            | UiAction::ApplySwitchConfig(_) => true,
+            UiAction::CycleSwitchField { .. } | UiAction::SetSwitchAlias { .. } => true,
             _ => return None,
         };
         configuration.then_some(self.configuration)
@@ -29,25 +26,23 @@ impl SwitchFeatures {
 }
 
 fn configuration_value(value: &str) -> bool {
-    matches!(
-        value,
-        "switch:sync" | "switch:configure" | "switch:back" | "switch:add"
-    ) || [
-        "switch:back:configure:",
-        "switch:add:",
-        "switch:edit:",
-        "switch:set:",
-        "switch:model:",
-        "switch:delete:",
-    ]
-    .iter()
-    .any(|prefix| value.starts_with(prefix))
+    matches!(value, "switch:configure" | "switch:back" | "switch:add")
+        || [
+            "switch:back:configure:",
+            "switch:add:",
+            "switch:edit:",
+            "switch:set:",
+            "switch:model:",
+            "switch:delete:",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
 }
 
 pub(in crate::interactive) enum SwitchIntent {
     Updated,
     Select(String),
-    SelectThenConfigure(String),
+    Apply(SwitchSettings),
 }
 
 pub(in crate::interactive) struct SwitchEditor {
@@ -128,12 +123,6 @@ impl SwitchPicker {
         );
     }
 
-    pub(in crate::interactive) fn open_configuration(&self, state: &mut UiState) {
-        if let Some(editor) = &self.editor {
-            open_switch_configure_picker(state, &editor.draft.borrow());
-        }
-    }
-
     pub(in crate::interactive) fn pick(
         &self,
         value: &str,
@@ -146,20 +135,14 @@ impl SwitchPicker {
         };
         let mut draft = editor.draft.borrow_mut();
         match value {
-            "switch:sync" => {
-                save_switches(&draft, state);
-                return Some(SwitchIntent::Select(session.current_switch.to_string()));
-            }
             "switch:configure" => open_switch_configure_picker(state, &draft),
             "switch:back" => open_switch_picker(state, session, &draft),
             "switch:add" => start_add_switch(state),
             _ => {
                 if let Some(name) = value.strip_prefix("switch:add:") {
                     add_switch(name, state, session, &mut draft);
-                } else if let Some(name) = value.strip_prefix("switch:back:configure:") {
-                    if name == session.current_switch.as_str() {
-                        return Some(SwitchIntent::SelectThenConfigure(name.to_owned()));
-                    }
+                    return Some(SwitchIntent::Apply(draft.clone()));
+                } else if value.starts_with("switch:back:configure:") {
                     open_switch_configure_picker(state, &draft);
                 } else if let Some(name) = value.strip_prefix("switch:edit:") {
                     open_switch_edit_picker(name, state, session, &draft);
@@ -177,12 +160,14 @@ impl SwitchPicker {
                                 session,
                                 &mut draft,
                             );
+                            return Some(SwitchIntent::Apply(draft.clone()));
                         }
                     }
                 } else if let Some(rest) = value.strip_prefix("switch:model:") {
                     if let Some((name, selection)) = rest.split_once(':') {
                         set_switch_model(name, selection, state, session, &mut draft);
                         open_switch_edit_picker(name, state, session, &draft);
+                        return Some(SwitchIntent::Apply(draft.clone()));
                     }
                 } else if value.starts_with("switch:delete:") {
                     if let Some(picker) = &mut state.picker {
@@ -191,7 +176,6 @@ impl SwitchPicker {
                     }
                     state.picker_confirming_delete = Some(value.to_owned());
                 } else {
-                    save_switches(&draft, state);
                     return Some(SwitchIntent::Select(name.to_owned()));
                 }
             }
@@ -212,9 +196,9 @@ impl SwitchPicker {
         let mut draft = editor.draft.borrow_mut();
         match action {
             UiAction::SetSwitchAlias { switch_name, alias } => {
-                set_switch_alias(&switch_name, &alias, state, session, &mut draft)
+                set_switch_alias(&switch_name, &alias, state, session, &mut draft);
+                return Some(SwitchIntent::Apply(draft.clone()));
             }
-            UiAction::SaveSwitchConfig => save_switches(&draft, state),
             UiAction::CycleSwitchField { value, direction } => {
                 if let Some(rest) = value.strip_prefix("switch:set:")
                     && let Some((name, field)) = rest.rsplit_once(':')
@@ -228,17 +212,13 @@ impl SwitchPicker {
                         session,
                         &mut draft,
                     );
-                }
-            }
-            UiAction::ApplySwitchConfig(name) => {
-                save_switches(&draft, state);
-                if name == session.current_switch.as_str() {
-                    return Some(SwitchIntent::Select(name));
+                    return Some(SwitchIntent::Apply(draft.clone()));
                 }
             }
             UiAction::DeletePick(value) => {
                 if let Some(name) = value.strip_prefix("switch:delete:") {
                     delete_switch(name, state, session, &mut draft);
+                    return Some(SwitchIntent::Apply(draft.clone()));
                 }
             }
             _ => return None,
@@ -576,7 +556,7 @@ fn next_work_mode(
     }
 }
 
-// Switch editors retain drafts; persistence does not gate the subsequent runtime selection.
+// Persistence failure cannot roll back an accepted runtime selection.
 pub(crate) fn save_switches(settings: &SwitchSettings, state: &mut UiState) {
     use crate::config::settings::SettingsWriteOutcome;
     match crate::config::settings::save_switches(settings.switches.clone()) {

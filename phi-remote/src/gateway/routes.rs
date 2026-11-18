@@ -699,6 +699,9 @@ fn session_receipt(submission: RemoteSubmission) -> Value {
         .filter_map(|notice| match notice {
             phi_sdk::hooks::HookNotice::Info { message }
             | phi_sdk::hooks::HookNotice::Warning { message } => Some(clipped(&message)),
+            phi_sdk::hooks::HookNotice::Cancelled { event } => {
+                Some(clipped(&format!("{event} hook cancelled")))
+            }
             phi_sdk::hooks::HookNotice::ContextInjected { .. } => None,
         })
         .collect();

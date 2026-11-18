@@ -1,4 +1,5 @@
 use crate::config::SwitchSettings;
+use crate::interactive::completion::matching_arguments;
 use crate::interactive::state::{MenuKind, ModelCatalogNotice, PickerKind, PickerState, UiState};
 use crate::session::Session;
 use phi_tui::{NotifyKind, SelectItem, StyledLine, ThemeColor, text::display_width};
@@ -9,14 +10,69 @@ use crate::runtime::preparation::ModelChoices;
 
 const INITIAL_DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
 
+pub(in crate::interactive::components) fn completion_query(state: &UiState) -> Option<&str> {
+    let input = state.editor.text();
+    if input.contains(['\n', '\r']) || state.editor.cursor() != input.len() {
+        return None;
+    }
+    let (name, arguments) = crate::commands::slash_command_parts(input)?;
+    (name == "model" && input["/model".len()..].starts_with(char::is_whitespace))
+        .then_some(arguments.trim_start())
+}
+
+pub(in crate::interactive::components) fn completion_usage(state: &UiState) -> Option<&str> {
+    if state.editor.text() != "/model" && completion_query(state) != Some("") {
+        return None;
+    }
+    state
+        .slash_commands
+        .iter()
+        .find(|command| command.name == "model")?
+        .arguments
+        .as_ref()
+        .map(|arguments| arguments.usage.as_str())
+}
+
+pub(in crate::interactive::components) fn completion_items(state: &UiState) -> Vec<SelectItem> {
+    let Some(query) = completion_query(state) else {
+        return Vec::new();
+    };
+    if query.is_empty()
+        || query.contains(char::is_whitespace)
+        || state
+            .model_arguments
+            .iter()
+            .any(|argument| argument.value == query)
+        || query == "update"
+    {
+        return Vec::new();
+    }
+    let mut matches = matching_arguments(&state.model_arguments, query);
+    if let Some(arguments) = state
+        .slash_commands
+        .iter()
+        .find(|command| command.name == "model")
+        .and_then(|command| command.arguments.as_ref())
+    {
+        matches.extend(matching_arguments(&arguments.values, query));
+    }
+    matches
+        .into_iter()
+        .map(|argument| match argument.value.split_once('/') {
+            Some((provider, model)) => SelectItem::with_label(&argument.value, model, provider),
+            None => SelectItem::new(&argument.value, "refresh model catalogs"),
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::interactive) struct ModelFeatures {
     pub(in crate::interactive) catalog_updates: bool,
 }
 
 impl ModelFeatures {
-    pub(in crate::interactive) fn command(self, command: crate::commands::ModelCommand) -> bool {
-        command != crate::commands::ModelCommand::Update || self.catalog_updates
+    pub(in crate::interactive) fn command(self, command: &crate::commands::ModelCommand) -> bool {
+        *command != crate::commands::ModelCommand::Update || self.catalog_updates
     }
 }
 
@@ -129,6 +185,29 @@ impl ModelPicker {
         if let Some(configuration) = &self.default_configuration {
             configuration.prepare(state);
         }
+        if let Some(choices) = self.read_choices(attachment, state, session).await {
+            update_model_completions(state, &choices);
+            open_model_choices(choices, state, session);
+        }
+    }
+
+    pub(in crate::interactive) async fn refresh_completions(
+        &self,
+        attachment: &AgentAttachment,
+        state: &mut UiState,
+        session: &Session,
+    ) {
+        if let Some(choices) = self.read_choices(attachment, state, session).await {
+            update_model_completions(state, &choices);
+        }
+    }
+
+    async fn read_choices(
+        &self,
+        attachment: &AgentAttachment,
+        state: &mut UiState,
+        session: &Session,
+    ) -> Option<Vec<crate::runtime::preparation::ModelChoice>> {
         let choices = match &self.choices {
             ChoiceSource::Catalog { models, draft } => models.model_choices(
                 session.provider.as_str(),
@@ -142,11 +221,11 @@ impl ModelPicker {
                         NotifyKind::Error,
                         format!("failed to load runtime choices: {error}"),
                     );
-                    return;
+                    return None;
                 }
             },
         };
-        open_model_choices(choices, state, session);
+        Some(choices)
     }
 
     pub(in crate::interactive) fn start_updates(&self, attachment: &AgentAttachment) {
@@ -195,10 +274,28 @@ impl ModelPicker {
             changed |= result.is_ok();
         }
         if changed && let ChoiceSource::Catalog { models, draft } = &self.choices {
-            refresh_open_model_picker(models, state, session, &draft.borrow());
+            let settings = draft.borrow();
+            let choices =
+                models.model_choices(&session.provider, &session.model, settings.default_model());
+            update_model_completions(state, &choices);
+            refresh_open_model_picker(models, state, session, &settings);
         }
         changed
     }
+}
+
+fn update_model_completions(
+    state: &mut UiState,
+    choices: &[crate::runtime::preparation::ModelChoice],
+) {
+    state.model_arguments = choices
+        .iter()
+        .filter(|choice| choice.complete)
+        .map(|choice| crate::commands::CommandArgument {
+            value: format!("{}/{}", choice.provider, choice.model),
+            alias: Some(choice.model.clone()),
+        })
+        .collect();
 }
 
 enum CatalogUpdateKind {

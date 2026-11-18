@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transcript::{AgentMessage, Transcript, TranscriptEntry, TranscriptEntryKind};
 use crate::utils::path::{phi_session_root, session_scope_dir};
-use crate::utils::workspace::get_project_meta;
+use crate::utils::workspace::WorkspaceMeta;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +87,7 @@ pub fn find_session_file(working_dir: &str, session_id: &str) -> anyhow::Result<
 }
 
 pub fn project_session_file_paths(working_dir: &str) -> anyhow::Result<Vec<PathBuf>> {
-    let project_root = canonical_or_original(Path::new(&get_project_meta(working_dir).root));
+    let project_root = canonical_or_original(&WorkspaceMeta::discover(working_dir, None)?.root);
     all_session_file_paths()?
         .into_iter()
         .try_fold(Vec::new(), |mut paths, path| {

@@ -67,6 +67,7 @@ fn hook_notice_message(notice: HookNotice) -> (NotifyKind, String) {
         }
         HookNotice::Warning { message } => (NotifyKind::Warning, message),
         HookNotice::Info { message } => (NotifyKind::Info, message),
+        HookNotice::Cancelled { event } => (NotifyKind::Info, format!("{event} hook cancelled")),
     }
 }
 

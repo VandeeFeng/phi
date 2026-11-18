@@ -907,14 +907,13 @@ impl ConversationView {
 
     fn set_tool_diff_view_status(&mut self, id: BlockId, diff: DiffView, status: BlockStatus) {
         self.finish_tool_timing(id);
-        let expanded = self.blocks_expanded.unwrap_or(true);
         if let Some(block) = self.touch_block(id) {
-            if matches!(&block.block.body, BlockBody::Diff(current) if current == &diff) {
-                block.block.set_status(status);
-                return;
+            if !matches!(&block.block.body, BlockBody::Diff(current) if current == &diff) {
+                let expanded =
+                    !matches!(block.block.body, BlockBody::Diff(_)) || block.block.is_expanded();
+                block.block.set_body(BlockBody::Diff(diff));
+                block.block.set_expanded(expanded);
             }
-            block.block.set_body(BlockBody::Diff(diff));
-            block.block.set_expanded(expanded);
             block.block.set_status(status);
         }
     }
@@ -1188,6 +1187,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_diff_expands_after_codemode_was_collapsed() {
+        let mut state = ConversationView::default();
+        let parent = state.project_tool_call_started(
+            "script",
+            "Codemode",
+            r#"{"code":"return 1;"}"#,
+            ToolDisplay::default(),
+        );
+        state.touch_block(parent).unwrap().block.set_expanded(true);
+        assert!(state.toggle_all_collapsible_blocks());
+        assert!(!state.block_is_expanded(parent));
+        assert!(state.project_tool_call_finished("script", "1", false, None));
+
+        let edit = state.project_tool_block("Edit", r#"{"path":"README.md"}"#, None);
+        let diff = DiffView::from_prefixed_text("+1 updated document");
+        state.set_tool_diff(edit, diff.clone());
+        assert!(state.block_is_expanded(edit));
+        state.touch_block(edit).unwrap().block.set_expanded(false);
+        state.set_tool_diff(edit, diff);
+        assert!(!state.block_is_expanded(edit));
+        state.set_tool_diff(edit, DiffView::from_prefixed_text("+1 another update"));
+        assert!(!state.block_is_expanded(edit));
+    }
+
+    #[test]
     fn codemode_completion_preserves_expansion_and_previews_only_text_regions() {
         let source = "const value = 1;\n".repeat(20) + "return value;";
         let args = serde_json::json!({"code": source}).to_string();
@@ -1325,6 +1349,7 @@ mod tests {
         assert!(state.project_event(phi_sdk::PhiEvent::NestedToolCall { call: call.clone() }));
         let mut completed = pending.clone();
         completed.id = "script/3".into();
+        completed.name = "Edit".into();
         completed.status = NestedCallStatus::Ok;
         assert!(state.project_tool_call_finished(
             "script",
@@ -1367,6 +1392,14 @@ mod tests {
         assert_eq!(block.status, BlockStatus::Error);
         assert!(matches!(&block.body, BlockBody::Output(text) if text.is_empty()));
         assert!(block.footer.as_ref().unwrap().text.contains("Took 1.5s"));
+        assert!(
+            matches!(&state.block(completed_id).unwrap().block.body, BlockBody::Output(text) if text.is_empty())
+        );
+        assert_eq!(state.blocks_expanded, None);
+        let edit = state.project_tool_block("Edit", r#"{"path":"README.md"}"#, None);
+        state.set_tool_diff(edit, DiffView::from_prefixed_text("+1 independent edit"));
+        assert!(state.block_is_expanded(edit));
+        assert_eq!(state.block(edit).unwrap().parent_id, None);
     }
 
     #[test]
@@ -1581,7 +1614,7 @@ mod tests {
 
         assert!(state.toggle_all_collapsible_blocks());
         state.set_tool_diff(retained, DiffView::from_prefixed_text("+changed"));
-        assert!(!state.block_is_expanded(retained));
+        assert!(state.block_is_expanded(retained));
         assert!(!state.block_is_expanded(future));
     }
 

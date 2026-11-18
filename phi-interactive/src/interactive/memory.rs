@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::commands::{MemoryCheckOptions, MemoryScope};
+#[cfg(test)]
+use phi_sdk::extension::memory::get_memory_dir;
 
 use phi_sdk::extension::memory::{
-    MemoryConfig, MemorySettings, TapeAnchor, TapeQuery, TapeService, get_global_memory_dir,
-    get_memory_dir, get_memory_repo_dir, is_memory_initialized, list_memory_files,
+    MemoryConfig, MemoryService, MemorySettings, TapeAnchor, TapeQuery, TapeService,
+    get_global_memory_dir, get_memory_repo_dir, is_memory_initialized, list_memory_files,
     settings_from_config, tape_gate_enabled,
 };
 
@@ -38,37 +40,29 @@ impl MemoryAdministration {
             }];
         }
         let settings = settings_from_config(&self.memory);
-        let memory_dir = get_memory_dir(&settings, &self.working_dir);
-        let repo_dir = get_memory_repo_dir(&settings);
-        let project = phi_sdk::workspace::get_project_meta(&self.working_dir);
-        let git_status = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok();
-        let is_dirty = git_status
-            .as_ref()
-            .filter(|output| output.status.success())
-            .is_some_and(|output| !output.stdout.is_empty());
-        let repo_status = if git_status
-            .as_ref()
-            .is_some_and(|output| output.status.success())
-        {
-            if is_dirty {
-                "Uncommitted changes"
-            } else {
-                "Clean"
+        let workspace = match phi_sdk::workspace::WorkspaceMeta::discover(&self.working_dir, None) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![MemoryNotice::Warning {
+                    message: format!("Memory workspace unavailable: {error}"),
+                }];
             }
-        } else if repo_dir.exists() {
-            "Not a git repo"
-        } else {
-            "Not cloned"
+        };
+        let repo_dir = get_memory_repo_dir(&settings);
+        let memory_dir = repo_dir.join(workspace.name());
+        let status = MemoryService::repository_is_dirty(&settings);
+        let is_dirty = matches!(status, Ok(true));
+        let repo_status = match status {
+            Ok(true) => "Uncommitted changes",
+            Ok(false) => "Clean",
+            Err(_) if !repo_dir.exists() => "Not cloned",
+            Err(_) => "Unavailable",
         };
         if !is_memory_initialized(&memory_dir) {
             return vec![MemoryNotice::Info {
                 message: format!(
                     "Memory: {} | Status: Not initialized | Repo: {repo_status} | Use /memory-init to set up | Path: {}",
-                    project.name,
+                    workspace.name(),
                     memory_dir.display()
                 ),
             }];
@@ -78,7 +72,7 @@ impl MemoryAdministration {
             .unwrap_or_default();
         let message = format!(
             "Memory: {} | Repo: {repo_status} | Files: {project_file_count} | Path: {}",
-            project.name,
+            workspace.name(),
             memory_dir.display()
         );
         let mut notices = vec![if is_dirty {
@@ -135,10 +129,11 @@ impl MemoryAdministration {
         if !tape_gate_enabled(settings, &self.working_dir) {
             return None;
         }
-        let project = phi_sdk::workspace::get_project_meta(&self.working_dir);
+        let workspace =
+            phi_sdk::workspace::WorkspaceMeta::discover(&self.working_dir, None).ok()?;
         let tape = TapeService::create(
-            get_memory_dir(settings, &self.working_dir),
-            &project.name,
+            get_memory_repo_dir(settings).join(workspace.name()),
+            workspace.name(),
             session_id,
             self.working_dir.display().to_string(),
         )
@@ -170,10 +165,10 @@ impl MemoryAdministration {
             tape_gate_enabled(&settings, &self.working_dir),
             "Tape runtime is unavailable."
         );
-        let project = phi_sdk::workspace::get_project_meta(&self.working_dir);
+        let workspace = phi_sdk::workspace::WorkspaceMeta::discover(&self.working_dir, None)?;
         let tape = TapeService::create(
-            get_memory_dir(&settings, &self.working_dir),
-            &project.name,
+            get_memory_repo_dir(&settings).join(workspace.name()),
+            workspace.name(),
             "",
             self.working_dir.display().to_string(),
         )
@@ -292,7 +287,7 @@ mod tests {
         assert!(matches!(&notices[..], [MemoryNotice::Info { message }]
             if message.contains("Not initialized") && message.contains("Not cloned")));
         let settings = settings_from_config(&admin.memory);
-        let memory_dir = get_memory_dir(&settings, &admin.working_dir);
+        let memory_dir = get_memory_dir(&settings, &admin.working_dir).unwrap();
         std::fs::create_dir_all(memory_dir.join("core")).unwrap();
         let notices = admin.check(&options);
         assert!(matches!(&notices[1], MemoryNotice::Warning { message }
@@ -336,7 +331,7 @@ mod tests {
         std::fs::create_dir_all(&admin.working_dir).unwrap();
         let settings = settings_from_config(&admin.memory);
         let tape = TapeService::create(
-            get_memory_dir(&settings, &admin.working_dir),
+            get_memory_dir(&settings, &admin.working_dir).unwrap(),
             "project",
             "",
             admin.working_dir.display().to_string(),

@@ -48,7 +48,7 @@ Architecture: [application](../docs/design-interactive.md), [runtime boundaries]
 - Register the master through ordinary SDK registration, without privileged Agent authority. Master names the primary conversation Agent, not a permission role. Preserve specialization/directory/grants/origin during rebuild. Reject stopped delegated execution until validated reconstruction exists; passive history is data only.
 - Preserve accepted transactions, submission/Memory accounting and confirmed permission answers despite waiter loss. Preparation before admission remains cancellable.
 - Permission accounting has its own gate: lifecycle hooks may require replies. Do not await slow work while holding association map locks.
-- Main finalizes Sessions after mode success/failure and shuts down startup MCP resources. Print emits successful output only after cleanup. Interactive stops input before awaiting root cleanup while TerminalGuard remains alive.
+- Main finalizes Sessions after mode success/failure and shuts down startup MCP resources. Print teardown cancels background hooks with outcome `cancelled` before bounded SessionEnd execution; successful output follows persistence and resource cleanup. Interactive retains input and TerminalGuard while awaiting root cleanup, warns once when hooks remain in flight, and permits a subsequent Ctrl+C to restore the terminal and force exit with code 130, bypassing remaining finalization. Normal completion stops input after the final frame. See [shutdown policy](../docs/design-interactive.md#interactive-event-loop).
 - Save/SDK finalization failures retain closed associations, canonical evidence and locks for retry. Do not repeat SessionEnd, fabricate outcomes or remove a reused registration.
 
 ## RPC scope

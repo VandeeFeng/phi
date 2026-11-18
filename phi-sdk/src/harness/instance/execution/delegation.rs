@@ -73,7 +73,7 @@ impl PendingCreation {
 impl DirectedDelegation {
     pub(super) fn instruction(&self) -> String {
         let mode = self.mode.unwrap_or(DelegationMode::Background);
-        let binding = serde_json::json!({ "role": self.agent, "mode": mode });
+        let binding = serde_json::json!({ "action": "create", "role": self.agent, "mode": mode });
         let delivery = match mode {
             DelegationMode::Foreground => {
                 "Wait for the child's result in the Agent tool response, then summarize it for the user. Do not invoke any more tools. Runtime policy may still require background execution; if a launch receipt is returned instead, this turn ends and the result arrives asynchronously."
@@ -86,10 +86,11 @@ impl DirectedDelegation {
             "[Directed delegation for this turn only]\n\
              The user's @ prompt requests delegation, not a direct answer from you. \
              Invoke the Agent tool exactly once with these fixed arguments: {binding}. \
-             The mode is fixed; do not change it based on the task text. \
              Only -f/-b immediately after the @agent name is mode syntax; everything after it is task text. \
-             Formulate the child's prompt from the user's task and choose an existing working_dir from their intent. \
-             Omit working_dir to use your current working directory. Clarify ambiguous directory/worktree intent rather than guessing. \
+             Formulate the child's prompt from the user's task. \
+             If the user specifies a directory or worktree, set working_dir to that existing directory. \
+             Omit working_dir only when the user does not specify a directory, to inherit your current directory. \
+             Clarify ambiguous directory/worktree intent rather than guessing. \
              Do not treat the @ prefix as a tool name or a shell command. \
              A response without the matching Agent call is a delegation failure. \
              Delegate using the tool; do not perform the child's task yourself. \

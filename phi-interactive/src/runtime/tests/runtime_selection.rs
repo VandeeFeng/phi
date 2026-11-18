@@ -1,6 +1,141 @@
 use super::*;
 
 #[tokio::test]
+async fn edited_switch_definitions_apply_without_reload_and_reject_invalid_models() {
+    let (root, policy, _) = session_test_runtime();
+    let model_path = root.join("models.json");
+    std::fs::write(&model_path, br#"{"providers":{"local":{"api":"openai-completions","baseUrl":"http://localhost/v1","models":{"test":{"contextWindow":128000},"next":{"contextWindow":256000}}}}}"#).unwrap();
+    let mut configuration = policy.configuration.snapshot();
+    configuration.model_catalog = Arc::new(
+        ModelCatalog::load(phi_sdk::models::ModelCatalogOptions {
+            store_path: root.join("edited-switch-catalog.json"),
+            user_paths: vec![model_path],
+            offline: true,
+        })
+        .unwrap(),
+    );
+    configuration.settings.default_thinking_level = Some("low".into());
+    let catalog = configuration.model_catalog.clone();
+    let resources = RuntimeResources::new(
+        phi_sdk::PhiRuntimeServices::new().model_catalog(catalog.clone()),
+        Arc::new(phi_sdk::extension::ExtensionRuntime::load()),
+        catalog,
+        phi_sdk::sandbox::Sandbox::new(false, root.clone()).unwrap(),
+    );
+    let test_runtime = Arc::new(TestRuntime::new(AgentRuntimeFactory::new(resources)));
+    policy.configuration.publish_configuration(configuration);
+    policy.install(&test_runtime.preparation);
+    let mut session = crate::session::new("local", "test", 128_000, &root);
+    session.transcript.append_user_message("preserved history");
+    let agent = SessionWorkflows::new(
+        test_runtime.sessions.clone(),
+        test_runtime.preparation.clone(),
+    )
+    .unwrap()
+    .start_session(session, true)
+    .await
+    .unwrap();
+    let access = test_runtime.sessions.session_access(agent.instance().id());
+    let initial = agent.recovery().await.unwrap();
+    std::fs::create_dir_all(root.join(".phi")).unwrap();
+    std::fs::write(
+        root.join(".phi/settings.json"),
+        "invalid unrelated settings",
+    )
+    .unwrap();
+    let switches = Some(vec![crate::config::SwitchConfig {
+        name: "default".into(),
+        model: Some("next".into()),
+        ..Default::default()
+    }]);
+    let accepted = test_runtime
+        .preparation
+        .apply_switch_config(&access, switches.clone())
+        .await
+        .unwrap();
+    assert_eq!(accepted.session.model, "next");
+    assert_eq!(accepted.session.context_window, 256_000);
+    assert_eq!(
+        accepted.session.current_switch,
+        initial.session.current_switch
+    );
+    assert_eq!(
+        accepted.session.entries.len(),
+        initial.session.entries.len()
+    );
+    assert_eq!(
+        agent
+            .runtime()
+            .source_settings()
+            .unwrap()
+            .default_thinking_level
+            .as_deref(),
+        Some("low")
+    );
+    test_runtime
+        .preparation
+        .configure_runtime(
+            &access,
+            RuntimeSelection::Model {
+                selection: "model:local:test".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut updated = switches.unwrap();
+    updated.push(crate::config::SwitchConfig {
+        name: "review".into(),
+        model: Some("next".into()),
+        ..Default::default()
+    });
+    let accepted = test_runtime
+        .preparation
+        .apply_switch_config(&access, Some(updated.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.session.model, "test",
+        "editing another Switch must retain a temporary model"
+    );
+    let selected = test_runtime
+        .preparation
+        .configure_runtime(
+            &access,
+            RuntimeSelection::Switch {
+                name: "review".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.session.model, "next");
+    assert_eq!(selected.session.current_switch, "review");
+    let source_settings = agent.runtime().source_settings().unwrap();
+    updated[1].model = Some("missing".into());
+    assert!(
+        test_runtime
+            .preparation
+            .apply_switch_config(&access, Some(updated))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent.snapshot().await.runtime_generation_id,
+        selected.snapshot.runtime_generation_id
+    );
+    assert_eq!(agent.session().await.model, "next");
+    assert!(Arc::ptr_eq(
+        &source_settings,
+        &agent.runtime().source_settings().unwrap()
+    ));
+    test_runtime
+        .sessions
+        .shutdown(SessionEndReason::Quit)
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn temporary_thinking_and_model_selection_record_actual_switch_snapshots() {
     use phi_sdk::models::ThinkingLevel;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

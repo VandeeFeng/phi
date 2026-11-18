@@ -295,9 +295,11 @@ pub(super) fn update_settings_file<T>(
 
 pub fn project_scope_dir() -> Option<PathBuf> {
     project_scope_dir_for(&std::env::current_dir().ok()?)
+        .ok()
+        .flatten()
 }
 
-pub(crate) fn project_scope_dir_for(working_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn project_scope_dir_for(working_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     let home = phi_sdk::workspace::expand_home_path("~");
     scope_dir_for(working_dir, &home, &phi_path())
 }
@@ -307,10 +309,10 @@ pub(crate) fn same_directory(left: &Path, right: &Path) -> bool {
         == right.canonicalize().unwrap_or_else(|_| right.to_path_buf())
 }
 
-fn scope_dir_for(cwd: &Path, home: &Path, global_dir: &Path) -> Option<PathBuf> {
-    let root = phi_sdk::workspace::project_scope_root(cwd);
+fn scope_dir_for(cwd: &Path, home: &Path, global_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let root = phi_sdk::workspace::WorkspaceMeta::discover(cwd, None)?.root;
     let project = root.join(".phi");
-    (!same_directory(&root, home) && !same_directory(&project, global_dir)).then_some(project)
+    Ok((!same_directory(&root, home) && !same_directory(&project, global_dir)).then_some(project))
 }
 
 pub fn mcp_config_file_path() -> PathBuf {
@@ -370,7 +372,7 @@ pub(crate) fn load() -> anyhow::Result<Settings> {
 pub(super) fn read_sources(working_dir: &Path) -> anyhow::Result<(Settings, Settings)> {
     let global =
         load_settings_file(&settings_file_path())?.merge(load_mcp_file(&mcp_config_file_path())?);
-    let project = match project_scope_dir_for(working_dir) {
+    let project = match project_scope_dir_for(working_dir)? {
         Some(dir) => load_settings_file(&dir.join("settings.json"))?,
         None => Settings::default(),
     };
@@ -848,10 +850,15 @@ mod tests {
         let home = std::env::temp_dir().join(format!("phi-home-{}", uuid::Uuid::new_v4()));
         let cwd = home.join("project");
         let global = home.join(".phi");
+        std::fs::create_dir_all(&cwd).unwrap();
 
-        assert_eq!(scope_dir_for(&home, &home, &global), None);
-        assert_eq!(scope_dir_for(&cwd, &home, &global), Some(cwd.join(".phi")));
-        assert_eq!(scope_dir_for(&cwd, &home, &cwd.join(".phi")), None);
+        assert_eq!(scope_dir_for(&home, &home, &global).unwrap(), None);
+        assert_eq!(
+            scope_dir_for(&cwd, &home, &global).unwrap(),
+            Some(cwd.join(".phi"))
+        );
+        assert_eq!(scope_dir_for(&cwd, &home, &cwd.join(".phi")).unwrap(), None);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -871,7 +878,7 @@ mod tests {
         let home = root.join("home");
         let global = home.join(".phi");
         assert_eq!(
-            scope_dir_for(&nested, &home, &global),
+            scope_dir_for(&nested, &home, &global).unwrap(),
             Some(root.join(".phi"))
         );
         assert!(
@@ -907,11 +914,11 @@ mod tests {
         let linked_nested = linked.join("src");
         std::fs::create_dir_all(&linked_nested).unwrap();
         assert_eq!(
-            scope_dir_for(&linked_nested, &home, &global),
+            scope_dir_for(&linked_nested, &home, &global).unwrap(),
             Some(linked.join(".phi"))
         );
         assert_eq!(
-            project_scope_dir_for(&linked_nested),
+            project_scope_dir_for(&linked_nested).unwrap(),
             Some(linked.join(".phi"))
         );
         std::fs::remove_dir_all(linked).unwrap();

@@ -222,6 +222,14 @@ impl SessionAccess {
 }
 
 impl SessionAssociations {
+    pub(crate) fn running_hook_count(&self) -> anyhow::Result<usize> {
+        Ok(self
+            .agent_sessions()?
+            .iter()
+            .map(|agent| agent.runtime().sdk_resources().running_hook_count())
+            .sum())
+    }
+
     pub(crate) fn take_notices(&self) -> anyhow::Result<Vec<SessionNotices>> {
         let mut notices = self
             .retired_notices

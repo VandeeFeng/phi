@@ -997,8 +997,19 @@ impl AgentRuntimeResources {
         self.hooks.ready().await
     }
 
+    /// Returns a transient count of in-flight hook invocations for this generation.
+    pub fn running_hook_count(&self) -> usize {
+        self.hooks.running_hook_count()
+    }
+
     pub fn take_hook_notices(&self) -> Vec<HookNotice> {
         self.hooks.take_notices()
+    }
+
+    /// Cancels owned background hooks and prevents new background work in this generation.
+    /// SessionEnd callbacks remain available for bounded cleanup.
+    pub async fn cancel_background_hooks(&self) {
+        self.hooks.cancel_background_hooks().await;
     }
 
     pub fn notify(&self, event: NotificationEvent) {

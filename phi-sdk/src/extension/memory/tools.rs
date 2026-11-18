@@ -378,10 +378,13 @@ pub(crate) fn collect_memory_tools(
             .ok()
             .map(Arc::new)
     });
-    let memory_dir = memory
+    let Some(memory_dir) = memory
         .as_ref()
         .map(|service| service.memory_project_dir().to_path_buf())
-        .unwrap_or_else(|| memory_core::get_memory_dir(&settings, &cwd));
+        .or_else(|| memory_core::get_memory_dir(&settings, &cwd).ok())
+    else {
+        return Vec::new();
+    };
     let mut registrations = vec![
         tool_registration(
             MemorySyncTool::new(
@@ -1602,7 +1605,7 @@ mod tests {
         let directory =
             PathBuf::from("/tmp").join(format!("phi-anchor-permission-{}", uuid::Uuid::new_v4()));
         let memory = Arc::new(MemoryService::new(&directory, "test").unwrap());
-        let tape = Arc::new(TapeService::create(&directory, "test", "session", "").unwrap());
+        let tape = Arc::new(TapeService::create(&directory, "test", "session", "/tmp").unwrap());
         let anchor = tape
             .create_anchor_without_transcript("checkpoint", TapeAnchorType::Normal, None)
             .unwrap();
@@ -1637,7 +1640,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(tape.search(TapeQuery::default()).unwrap().len(), 1);
+        assert_eq!(tape.get_anchor_store().get_all_anchors().unwrap().len(), 1);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

@@ -521,6 +521,17 @@ impl AgentAttachment {
             .await
     }
 
+    pub(crate) async fn apply_switch_config(
+        &self,
+        switches: Option<Vec<crate::config::SwitchConfig>>,
+    ) -> anyhow::Result<crate::runtime::RuntimeView> {
+        let local = self.local()?;
+        local
+            .preparation
+            .apply_switch_config(&local.session, switches)
+            .await
+    }
+
     pub(crate) async fn configure_runtime(
         &self,
         selection: crate::runtime::preparation::RuntimeSelection,

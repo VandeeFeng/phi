@@ -22,8 +22,7 @@ pub use widgets::dialog::{
     Choice, ChoiceAction, ConfirmAction, ConfirmDialog, TextInputAction, TextInputDialog,
 };
 pub use widgets::footer::{
-    Footer, FooterAlign, FooterLine, FooterSection, current_git_branch, model_with_thinking_level,
-    path_with_git_branch,
+    Footer, FooterAlign, FooterLine, FooterSection, model_with_thinking_level, path_with_git_branch,
 };
 pub use widgets::menu::{
     MenuState, Picker, PickerAction, PickerState, SelectItem, SelectMenu, SelectMenuState,
